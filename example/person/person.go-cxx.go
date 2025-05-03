@@ -1,10 +1,13 @@
 package person
 
+import (
+	go_cxx "github.com/jurgen-kluft/go-cxx/core"
+	address "github.com/jurgen-kluft/go-cxx/example/address"
+)
+
 // ---------------------------------------------------
 // Settings of this package for the `go-cxx` compiler
 // ---------------------------------------------------
-import go_cxx "github.com/jurgen-kluft/go-cxx/core"
-
 var __settings = go_cxx.Settings{
 	Export:    true,
 	Namespace: "nperson",
@@ -18,9 +21,10 @@ var __settings = go_cxx.Settings{
 // ---------------------------------------------------
 
 type Person struct {
-	age    int
-	health float32
-	iq     int
+	age     int
+	health  float32
+	iq      int
+	address address.Address
 }
 
 var Population int

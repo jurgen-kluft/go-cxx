@@ -358,7 +358,7 @@ type Compiler struct {
 	fileSet *token.FileSet
 	types   *types.Info
 
-	externs         map[types.Object]string
+	//namespace       map[types.Object]string
 	packageContexts map[string]*PackageContext // map[pkg.ID]*PackageContext
 	fieldIndices    map[*types.Var]int
 	methodRenames   map[types.Object]string
@@ -397,7 +397,7 @@ func newCompiler(mainPkgPath string) *Compiler {
 			types.Uint64:       "uint64_t",
 			types.String:       "gx::String",
 		},
-		externs:            make(map[types.Object]string),
+		//namespace:          make(map[types.Object]string),
 		packageContexts:    make(map[string]*PackageContext),
 		fieldIndices:       make(map[*types.Var]int),
 		methodRenames:      make(map[types.Object]string),
@@ -494,11 +494,16 @@ func (cl *Compiler) genTypeExpr(typ types.Type, pos token.Pos, varName string) s
 		builder.WriteByte('*')
 	case *types.Named:
 		name := typ.Obj()
-		if ext, ok := cl.externs[name]; ok {
-			builder.WriteString(ext)
-		} else {
-			builder.WriteString(name.Name())
-		}
+
+		builder.WriteString(name.Name())
+		// if ns, ok := cl.namespace[typ.Obj()]; ok {
+		// 	builder.WriteString(ns)
+		// 	builder.WriteString("::")
+		// 	builder.WriteString(name.Name())
+		// } else {
+		// 	builder.WriteString(name.Name())
+		// }
+
 		if typeArgs := typ.TypeArgs(); typeArgs != nil {
 			builder.WriteString("<")
 			for i, nTypeArgs := 0, typeArgs.Len(); i < nTypeArgs; i++ {
@@ -811,9 +816,9 @@ func (cl *Compiler) getIdent(ident *ast.Ident) string {
 	if typ.IsBuiltin() {
 		return "gx::"
 	}
-	if ext, ok := cl.externs[cl.types.Uses[ident]]; ok {
-		return ext
-	}
+	// if ext, ok := cl.namespace[cl.types.Uses[ident]]; ok {
+	// 	return ext
+	// }
 	// TODO: Package namespace
 	return ident.Name
 }
@@ -1543,7 +1548,7 @@ func (cl *Compiler) compile() (*TextStream, *TextStream) {
 	}
 
 	// Collect exports
-	exports := map[types.Object]bool{}
+	// exports := map[types.Object]bool{}
 
 	// Collect top-level decls and exports in output order
 	{
@@ -1586,7 +1591,7 @@ func (cl *Compiler) compile() (*TextStream, *TextStream) {
 							case *ast.TypeSpec:
 								var visitTypeSpec func(typeSpec *ast.TypeSpec, export bool)
 								visitTypeSpec = func(typeSpec *ast.TypeSpec, export bool) {
-									if _, ok := cl.externs[cl.types.Defs[typeSpec.Name]]; ok {
+									if _, ok := cl.namespace[cl.types.Defs[typeSpec.Name]]; ok {
 										return
 									}
 									obj := cl.types.Defs[typeSpec.Name]
@@ -1607,9 +1612,11 @@ func (cl *Compiler) compile() (*TextStream, *TextStream) {
 											}
 										}
 									}
-									if export {
-										exports[obj] = true
-									}
+
+									// if export {
+									// 	exports[obj] = true
+									// }
+
 									ast.Inspect(typeSpec.Type, func(node ast.Node) bool {
 										if ident, ok := node.(*ast.Ident); ok {
 											if typeSpec, ok := ctx.objTypeSpecs[cl.types.Uses[ident]]; ok {
@@ -1638,23 +1645,25 @@ func (cl *Compiler) compile() (*TextStream, *TextStream) {
 										}
 										return true
 									})
-									extern := false
-									for _, name := range valueSpec.Names {
-										if _, ok := cl.externs[cl.types.Defs[name]]; ok {
-											extern = true
-										}
-									}
-									if !extern {
-										ctx.valueSpecs = append(ctx.valueSpecs, valueSpec)
-									}
+									// extern := false
+									// for _, name := range valueSpec.Names {
+									// 	if _, ok := cl.namespace[cl.types.Defs[name]]; ok {
+									// 		extern = true
+									// 	}
+									// }
+									// if !extern {
+									// 	ctx.valueSpecs = append(ctx.valueSpecs, valueSpec)
+									// }
+									ctx.valueSpecs = append(ctx.valueSpecs, valueSpec)
 								}
 								visitValueSpec(spec)
 							}
 						}
 					case *ast.FuncDecl:
-						if _, ok := cl.externs[cl.types.Defs[decl.Name]]; !ok {
-							ctx.funcDecls = append(ctx.funcDecls, decl)
-						}
+						ctx.funcDecls = append(ctx.funcDecls, decl)
+						// if _, ok := cl.namespace[cl.types.Defs[decl.Name]]; !ok {
+						// 	ctx.funcDecls = append(ctx.funcDecls, decl)
+						// }
 					}
 				}
 			}
@@ -1690,6 +1699,7 @@ func (cl *Compiler) compile() (*TextStream, *TextStream) {
 			}
 		}
 	}
+
 	// Output C++ source file (.cpp)
 	outputCC := newTextStream(1024)
 	{
@@ -1712,12 +1722,24 @@ func (cl *Compiler) compile() (*TextStream, *TextStream) {
 			}
 		}
 
-		// Types
-		// C++ source file (.cpp)
-		text.writeLn("//", "// Types", "//")
 		for _, pkg := range pkgs {
 			cl.currentPkg = pkg
 			ctx := cl.packageContexts[pkg.ID]
+
+			// Namespace
+			// C++ source file (.cpp)
+			text.write("namespace ")
+			if ctx.settings.Namespace != "" {
+				text.writeLn(ctx.settings.Namespace)
+			} else {
+				text.writeLn(pkg.Types.Name())
+			}
+			text.writeLn("{")
+			text.blockStart()
+
+			// Types
+			// C++ source file (.cpp)
+			text.writeLn("//", "// Types", "//")
 			for _, typeSpec := range ctx.typeSpecs {
 				cl.genTypeDefn(typeSpec)
 				if typeDecl := cl.genTypeDecl(typeSpec); typeDecl != "" {
@@ -1726,16 +1748,12 @@ func (cl *Compiler) compile() (*TextStream, *TextStream) {
 					text.writeLn()
 				}
 			}
-		}
 
-		// Function declarations (private)
-		// C++ source file (.cpp)
-		text.writeLn()
-		text.writeLn()
-		text.writeLn("//", "// Function declarations", "//")
-		for _, pkg := range pkgs {
-			cl.currentPkg = pkg
-			ctx := cl.packageContexts[pkg.ID]
+			// Function declarations (private)
+			// C++ source file (.cpp)
+			text.writeLn()
+			text.writeLn()
+			text.writeLn("//", "// Function declarations", "//")
 			for _, fn := range ctx.functions {
 				if fn.Public {
 					fn.writeImpl(text, cl)
@@ -1744,32 +1762,24 @@ func (cl *Compiler) compile() (*TextStream, *TextStream) {
 					fn.writeImpl(text, cl)
 				}
 			}
-		}
 
-		// Variables (only private?)
-		// C++ source file (.cpp)
-		text.writeLn()
-		text.writeLn()
-		text.writeLn("//", "// Variables", "//")
-		for _, pkg := range pkgs {
-			cl.currentPkg = pkg
-			ctx := cl.packageContexts[pkg.ID]
+			// Variables (only private?)
+			// C++ source file (.cpp)
+			text.writeLn()
+			text.writeLn()
+			text.writeLn("//", "// Variables", "//")
 			for _, v := range ctx.vars {
 				if !v.Public {
 					text.write("static ")
 					v.writeDecl(text)
 				}
 			}
-		}
 
-		// Method implementations
-		// C++ source file (.cpp)
-		text.writeLn()
-		text.writeLn()
-		text.writeLn("//", "// Type method implementations", "//")
-		for _, pkg := range pkgs {
-			cl.currentPkg = pkg
-			ctx := cl.packageContexts[pkg.ID]
+			// Method implementations
+			// C++ source file (.cpp)
+			text.writeLn()
+			text.writeLn()
+			text.writeLn("//", "// Type method implementations", "//")
 			for _, s := range ctx.structs {
 				if s.Public {
 					// Header file has declarations
@@ -1782,6 +1792,9 @@ func (cl *Compiler) compile() (*TextStream, *TextStream) {
 					s.writeMethodImplementations(text, cl)
 				}
 			}
+
+			text.writeLn("}")
+			text.blockEnd()
 		}
 	}
 
