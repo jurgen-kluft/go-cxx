@@ -1,0 +1,43 @@
+#ignore all files
+*
+!*/
+
+vendor/
+
+#except the following files
+!*.cpp
+!*.hpp
+!*.c
+!*.h
+!*.hh
+!*.inl
+
+!*.sln
+!*.vcproj
+!*.vcxproj
+
+!*.txt
+!*.md
+
+!*.cs
+!*.csproj
+!*.resx
+
+!*.go
+!go.mod
+!go.sum
+
+!*.json
+!*.mk
+
+!*.ini
+!*.bat
+
+!.gitignore
+!.clang-format
+!.clangd
+!.editorconfig
+
+
+#except the following folders
+.vscode/settings.json
