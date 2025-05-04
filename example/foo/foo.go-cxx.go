@@ -6,8 +6,9 @@ package foo
 import go_cxx "github.com/jurgen-kluft/go-cxx/core"
 
 var __settings = go_cxx.Settings{
-	Export:    false,
-	Namespace: "nfoo",
+	ExportSource: true,
+	ExportHeader: true,
+	Namespace:    "nfoo",
 	Includes: []string{
 		"go-cxx-core.h",
 		"go-cxx/go-cxx-foo.h",

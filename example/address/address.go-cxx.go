@@ -6,8 +6,9 @@ package naddress
 import go_cxx "github.com/jurgen-kluft/go-cxx/core"
 
 var __settings = go_cxx.Settings{
-	Export:    true,
-	Namespace: "naddress",
+	ExportSource: true,
+	ExportHeader: true,
+	Namespace:    "naddress",
 	Includes: []string{
 		"go-cxx-core.h",
 		"go-cxx/cdb/go-cxx-db.h",

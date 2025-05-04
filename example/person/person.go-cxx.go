@@ -11,7 +11,7 @@ import (
 var __settings = go_cxx.Settings{
 	ExportSource: true,
 	ExportHeader: true,
-	IsInstance:   false,
+	Instance:     "",
 	Namespace:    "nperson",
 	Includes: []string{
 		"go-cxx-core.h",

@@ -26,6 +26,7 @@ const lineWithSpaces = "                                                        
 type TextStream struct {
 	Indent         int
 	IndentInSpaces int
+	BlockEnded     bool
 	Line           string
 	Lines          []string
 }
@@ -34,6 +35,7 @@ func newTextStream(reserveLines int) *TextStream {
 	return &TextStream{
 		Indent:         0,
 		IndentInSpaces: 4,
+		BlockEnded:     false,
 		Line:           "",
 		Lines:          make([]string, 0, reserveLines),
 	}
@@ -48,6 +50,7 @@ func (ts *TextStream) blockEnd() {
 	if ts.Indent < 0 {
 		ts.Indent = 0
 	}
+	ts.BlockEnded = true
 }
 
 func (ts *TextStream) flush() {
@@ -575,21 +578,8 @@ func (cl *Compiler) genTypeExpr(typ types.Type, pos token.Pos, varName string) s
 		packageName := packageAndType[0]
 		typeName := packageAndType[1]
 
-		// The package name needs to be replaced with the namespace
-		if pkg, ok := cl.nameToPackage[packageName]; ok {
-			if pkg.ID != cl.currentPkg.ID {
-				ctx := cl.packageContexts[pkg.ID]
-				if ctx.settings.IsInstance {
-					fullyQualifiedName = ctx.settings.Namespace + "." + typeName
-				} else {
-					fullyQualifiedName = ctx.settings.Namespace + "::" + typeName
-				}
-			} else {
-				fullyQualifiedName = typeName
-			}
-		} else {
-			fullyQualifiedName = typeName
-		}
+		// The package name needs to be substituted with the namespace and/or instance specifier
+		fullyQualifiedName = cl.getScope(packageName) + typeName
 
 		builder.WriteString(fullyQualifiedName)
 
@@ -1088,22 +1078,28 @@ func (cl *Compiler) writeSelectorExpr(sel *ast.SelectorExpr, text *TextStream) {
 		text.write("this->")
 	}
 
+	// Prefix with namespace and/or instance specifier
 	if sel.X != nil {
 		pkgName := sel.X.(*ast.Ident).Name
-		if pkg, ok := cl.nameToPackage[pkgName]; ok {
-			if pkg.ID != cl.currentPkg.ID {
-				ctx := cl.packageContexts[pkg.ID]
-				text.write(ctx.settings.Namespace)
-				if ctx.settings.IsInstance {
-					text.write(".")
-				} else {
-					text.write("::")
-				}
-			}
-		}
+		text.write(cl.getScope(pkgName))
 	}
 
 	text.write(cl.getIdent(sel.Sel))
+}
+
+func (cl *Compiler) getScope(pkgName string) string {
+	if pkg, ok := cl.nameToPackage[pkgName]; ok {
+		if pkg.ID != cl.currentPkg.ID {
+			ctx := cl.packageContexts[pkg.ID]
+			if ctx.settings.Namespace != "" {
+				return ctx.settings.Namespace + "::"
+			}
+			if ctx.settings.Instance != "" {
+				return ctx.settings.Instance + "."
+			}
+		}
+	}
+	return ""
 }
 
 func (cl *Compiler) writeIndexExpr(ind *ast.IndexExpr, text *TextStream) {
@@ -1167,20 +1163,10 @@ func (cl *Compiler) writeCallExpr(call *ast.CallExpr, text *TextStream) {
 				typeArgs = instance.TypeArgs
 			case *ast.SelectorExpr: // pkg.f(...)
 
-				// See if we need to add the package namespace to the function call
+				// Prefix with namespace and/or instance specifier
 				if fun.Sel != nil {
 					pkgName := fun.X.(*ast.Ident).Name
-					if pkg, ok := cl.nameToPackage[pkgName]; ok {
-						if pkg.ID != cl.currentPkg.ID {
-							ctx := cl.packageContexts[pkg.ID]
-							text.write(ctx.settings.Namespace)
-							if ctx.settings.IsInstance {
-								text.write(".")
-							} else {
-								text.write("::")
-							}
-						}
-					}
+					text.write(cl.getScope(pkgName))
 				}
 
 				text.write(cl.getIdent(fun.Sel))
@@ -1542,9 +1528,7 @@ func (cl *Compiler) writeStmt(stmt ast.Stmt, text *TextStream) string {
 func (cl *Compiler) writeStmtList(list []ast.Stmt, text *TextStream) {
 	for _, stmt := range list {
 		cl.writeStmt(stmt, text)
-		// if !cl.atBlockEnd {
-		// 	text.write(";")
-		// }
+		text.write(";")
 		text.writeLn()
 	}
 }
@@ -1575,24 +1559,24 @@ func parseCoreSettings(lit *ast.CompositeLit, settings *core.Settings) {
 							settings.ExportHeader = val.Value == "true"
 						}
 					}
-				} else if key.Name == "IsInstance" {
+				} else if key.Name == "Instance" {
 					if val, ok := kv.Value.(*ast.Ident); ok {
-						settings.IsInstance = val.Name == "true"
+						settings.Instance, _ = strconv.Unquote(val.Name)
 					} else if val, ok := kv.Value.(*ast.BasicLit); ok {
 						if val.Kind == token.STRING {
-							settings.IsInstance = val.Value == "true"
+							settings.Instance, _ = strconv.Unquote(val.Value)
 						}
 					}
 				} else if key.Name == "Namespace" {
 					if val, ok := kv.Value.(*ast.BasicLit); ok {
 						if val.Kind == token.STRING {
-							settings.Namespace = val.Value[1 : len(val.Value)-1]
+							settings.Namespace, _ = strconv.Unquote(val.Value)
 						}
 					}
 				} else if key.Name == "OutputPrefix" {
 					if val, ok := kv.Value.(*ast.BasicLit); ok {
 						if val.Kind == token.STRING {
-							settings.OutputPrefix = val.Value[1 : len(val.Value)-1]
+							settings.OutputPrefix, _ = strconv.Unquote(val.Value)
 						}
 					}
 				} else if key.Name == "Includes" {

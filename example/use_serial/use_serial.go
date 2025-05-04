@@ -11,8 +11,8 @@ import (
 var __settings = go_cxx.Settings{
 	ExportSource: true,
 	ExportHeader: true,
-	IsInstance:   false,
-	Namespace:    "use_serial",
+	Instance:     "",
+	Namespace:    "",
 	Includes: []string{
 		"go-cxx-core.h",
 		"go-cxx/cdb/go-cxx-db.h",
