@@ -53,6 +53,13 @@ func (ts *TextStream) blockEnd() {
 	}
 }
 
+func (ts *TextStream) flush() {
+	if len(ts.Line) > 0 {
+		ts.Lines = append(ts.Lines, ts.Line)
+		ts.Line = ""
+	}
+}
+
 func (ts *TextStream) write(s string) {
 	if len(ts.Line) == 0 {
 		numSpaces := ts.Indent * ts.IndentInSpaces
@@ -218,8 +225,11 @@ func (m MemberInfo) writeDecl(text *TextStream) {
 	text.write(m.Name)
 	if len(m.Value) > 0 {
 		text.write(" = ")
-		for _, l := range m.Value {
-			text.writeLn(l)
+		for i, l := range m.Value {
+			if i > 0 {
+				text.writeLn()
+			}
+			text.write(l)
 		}
 	}
 	text.writeLn(";")
@@ -1457,6 +1467,18 @@ settings_found:
 	cl.packageContexts[pkg.ID].settings = settings
 }
 
+func (cl *Compiler) writeIncludes(text *TextStream) {
+	includeGuard := map[string]bool{}
+	for _, ctx := range cl.packageContexts {
+		for _, include := range ctx.settings.Includes {
+			if _, ok := includeGuard[include]; !ok {
+				includeGuard[include] = true
+				text.writeLn("#include \"" + include + "\"")
+			}
+		}
+	}
+}
+
 func (cl *Compiler) compile() (*TextStream, *TextStream) {
 	// Load main package
 	packagesConfig := &packages.Config{
@@ -1591,12 +1613,15 @@ func (cl *Compiler) compile() (*TextStream, *TextStream) {
 							case *ast.TypeSpec:
 								var visitTypeSpec func(typeSpec *ast.TypeSpec, export bool)
 								visitTypeSpec = func(typeSpec *ast.TypeSpec, export bool) {
-									if _, ok := cl.namespace[cl.types.Defs[typeSpec.Name]]; ok {
-										return
-									}
+									// if _, ok := cl.namespace[cl.types.Defs[typeSpec.Name]]; ok {
+									// 	return
+									// }
 									obj := cl.types.Defs[typeSpec.Name]
 									visited := typeSpecVisited[typeSpec]
-									if visited && !(export && !exports[obj]) {
+									// if visited && !(export && !exports[obj]) {
+									// 	return
+									// }
+									if visited {
 										return
 									}
 									if !visited {
@@ -1690,6 +1715,7 @@ func (cl *Compiler) compile() (*TextStream, *TextStream) {
 				if len(valueSpec.Values) > 0 {
 					text := newTextStream(2)
 					cl.writeExpr(valueSpec.Values[i], text)
+					text.flush()
 					value = text.Lines
 				}
 				typeStr := cl.genTypeExpr(cl.types.TypeOf(valueSpec.Names[i]), valueSpec.Pos(), "")
@@ -1712,15 +1738,8 @@ func (cl *Compiler) compile() (*TextStream, *TextStream) {
 
 		// Includes
 		// C++ source file (.cpp)
-		for _, pkg := range pkgs {
-			cl.currentPkg = pkg
-			ctx := cl.packageContexts[pkg.ID]
-			for _, include := range ctx.settings.Includes {
-				text.write("#include \"")
-				text.write(include)
-				text.writeLn("\"")
-			}
-		}
+		cl.writeIncludes(text)
+		text.writeLn()
 
 		for _, pkg := range pkgs {
 			cl.currentPkg = pkg
@@ -1815,15 +1834,8 @@ func (cl *Compiler) compile() (*TextStream, *TextStream) {
 
 		// Includes
 		// C++ header file (.h)
-		for _, pkg := range pkgs {
-			cl.currentPkg = pkg
-			ctx := cl.packageContexts[pkg.ID]
-			for _, include := range ctx.settings.Includes {
-				text.write("#include \"")
-				text.write(include)
-				text.writeLn("\"")
-			}
-		}
+		cl.writeIncludes(text)
+		text.writeLn()
 
 		// Namespace for every package
 		// C++ header file (.h)
@@ -1850,6 +1862,8 @@ func (cl *Compiler) compile() (*TextStream, *TextStream) {
 				}
 			}
 
+			// Variables
+			// C++ header file (.h)
 			text.writeLn()
 			text.writeLn()
 			text.writeLn("//", "// Variables", "//")
