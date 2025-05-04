@@ -1,4 +1,4 @@
-package address
+package naddress
 
 // ---------------------------------------------------
 // Settings of this package for the `go-cxx` compiler

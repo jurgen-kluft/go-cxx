@@ -6,7 +6,7 @@ package main
 
 import (
 	"github.com/jurgen-kluft/go-cxx/example/foo"
-	"github.com/jurgen-kluft/go-cxx/example/person"
+	nperson "github.com/jurgen-kluft/go-cxx/example/person"
 )
 
 //
@@ -694,9 +694,9 @@ func testExterns() {
 		check(r.area() == 600)
 	}
 	{
-		check(person.Population == 0)
-		p := person.NewPerson(20, 100, 42)
-		check(person.Population == 1)
+		check(nperson.Population == 0)
+		p := nperson.NewPerson(20, 100, 42)
+		check(nperson.Population == 1)
 		check(p.Age() == 20)
 		check(p.Health() == 100)
 		check(p.IQ() == 42)

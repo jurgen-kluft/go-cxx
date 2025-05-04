@@ -17,8 +17,7 @@
             "request": "launch",
             "mode": "auto",
             "args": [
-                "example/person/person.go-cxx.go",
-                "cpp"
+                "github.com/jurgen-kluft/go-cxx/example/use_serial/",
             ],
             "program": "${fileDirname}"
         }

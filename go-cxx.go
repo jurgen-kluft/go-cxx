@@ -578,7 +578,12 @@ func (cl *Compiler) genTypeExpr(typ types.Type, pos token.Pos, varName string) s
 		// The package name needs to be replaced with the namespace
 		if pkg, ok := cl.nameToPackage[packageName]; ok {
 			if pkg.ID != cl.currentPkg.ID {
-				fullyQualifiedName = packageName + "::" + typeName
+				ctx := cl.packageContexts[pkg.ID]
+				if ctx.settings.IsInstance {
+					fullyQualifiedName = ctx.settings.Namespace + "." + typeName
+				} else {
+					fullyQualifiedName = ctx.settings.Namespace + "::" + typeName
+				}
 			} else {
 				fullyQualifiedName = typeName
 			}
@@ -936,6 +941,9 @@ func (cl *Compiler) getIdent(ident *ast.Ident) string {
 	// }
 
 	// TODO: Package namespace
+	typName := types.TypeString(typ.Type, QualifierNameOf)
+	fmt.Println(typName)
+
 	return ident.Name
 }
 
@@ -1079,6 +1087,22 @@ func (cl *Compiler) writeSelectorExpr(sel *ast.SelectorExpr, text *TextStream) {
 		// }
 		text.write("this->")
 	}
+
+	if sel.X != nil {
+		pkgName := sel.X.(*ast.Ident).Name
+		if pkg, ok := cl.nameToPackage[pkgName]; ok {
+			if pkg.ID != cl.currentPkg.ID {
+				ctx := cl.packageContexts[pkg.ID]
+				text.write(ctx.settings.Namespace)
+				if ctx.settings.IsInstance {
+					text.write(".")
+				} else {
+					text.write("::")
+				}
+			}
+		}
+	}
+
 	text.write(cl.getIdent(sel.Sel))
 }
 
@@ -1142,6 +1166,23 @@ func (cl *Compiler) writeCallExpr(call *ast.CallExpr, text *TextStream) {
 				_, instance := cl.typesInstanceOf(fun)
 				typeArgs = instance.TypeArgs
 			case *ast.SelectorExpr: // pkg.f(...)
+
+				// See if we need to add the package namespace to the function call
+				if fun.Sel != nil {
+					pkgName := fun.X.(*ast.Ident).Name
+					if pkg, ok := cl.nameToPackage[pkgName]; ok {
+						if pkg.ID != cl.currentPkg.ID {
+							ctx := cl.packageContexts[pkg.ID]
+							text.write(ctx.settings.Namespace)
+							if ctx.settings.IsInstance {
+								text.write(".")
+							} else {
+								text.write("::")
+							}
+						}
+					}
+				}
+
 				text.write(cl.getIdent(fun.Sel))
 				_, instance := cl.typesInstanceOf(fun.Sel)
 				typeArgs = instance.TypeArgs
@@ -1518,16 +1559,28 @@ func parseCoreSettings(lit *ast.CompositeLit, settings *core.Settings) {
 	for _, elt := range lit.Elts {
 		if kv, ok := elt.(*ast.KeyValueExpr); ok {
 			if key, ok := kv.Key.(*ast.Ident); ok {
-				if key.Name == "Export" {
+				if key.Name == "ExportSource" {
 					if val, ok := kv.Value.(*ast.Ident); ok {
-						settings.Export = val.Name == "true"
+						settings.ExportSource = val.Name == "true"
 					} else if val, ok := kv.Value.(*ast.BasicLit); ok {
 						if val.Kind == token.STRING {
-							if val.Value == "true" {
-								settings.Export = true
-							} else if val.Value == "false" {
-								settings.Export = false
-							}
+							settings.ExportSource = val.Value == "true"
+						}
+					}
+				} else if key.Name == "ExportHeader" {
+					if val, ok := kv.Value.(*ast.Ident); ok {
+						settings.ExportHeader = val.Name == "true"
+					} else if val, ok := kv.Value.(*ast.BasicLit); ok {
+						if val.Kind == token.STRING {
+							settings.ExportHeader = val.Value == "true"
+						}
+					}
+				} else if key.Name == "IsInstance" {
+					if val, ok := kv.Value.(*ast.Ident); ok {
+						settings.IsInstance = val.Name == "true"
+					} else if val, ok := kv.Value.(*ast.BasicLit); ok {
+						if val.Kind == token.STRING {
+							settings.IsInstance = val.Value == "true"
 						}
 					}
 				} else if key.Name == "Namespace" {
@@ -1585,9 +1638,7 @@ func (cl *Compiler) collectPackageSettings(pkg *packages.Package) {
 			}
 		}
 	}
-
 settings_found:
-	cl.packageContexts[pkg.ID].settings = settings
 }
 
 func (cl *Compiler) writeIncludes(text *TextStream) {
@@ -1662,7 +1713,7 @@ func (cl *Compiler) compile() (*TextStream, *TextStream) {
 	for _, pkg := range pkgs {
 		cl.nameToPackage[pkg.Name] = pkg
 		ctx := &PackageContext{
-			settings:      &core.Settings{},
+			settings:      core.NewSettings(pkg.Types.Name()),
 			vars:          map[string]*MemberInfo{},
 			funcPtrs:      map[string]*FunctionPtrInfo{},
 			functions:     map[string]*FunctionInfo{},
@@ -1719,6 +1770,9 @@ func (cl *Compiler) compile() (*TextStream, *TextStream) {
 		valueSpecVisited := map[*ast.ValueSpec]bool{}
 		for _, pkg := range pkgs {
 			ctx := cl.packageContexts[pkg.ID]
+			if !ctx.settings.ExportSource && !ctx.settings.ExportHeader {
+				continue
+			}
 
 			for _, file := range pkg.Syntax {
 				for _, decl := range file.Decls {
@@ -1819,6 +1873,9 @@ func (cl *Compiler) compile() (*TextStream, *TextStream) {
 	for _, pkg := range pkgs {
 		cl.currentPkg = pkg
 		ctx := cl.packageContexts[pkg.ID]
+		if !ctx.settings.ExportSource && !ctx.settings.ExportHeader {
+			continue
+		}
 		for _, fd := range ctx.funcDecls {
 			cl.genFuncDecl(fd)
 		}
@@ -1828,6 +1885,9 @@ func (cl *Compiler) compile() (*TextStream, *TextStream) {
 	for _, pkg := range pkgs {
 		cl.currentPkg = pkg
 		ctx := cl.packageContexts[pkg.ID]
+		if !ctx.settings.ExportSource && !ctx.settings.ExportHeader {
+			continue
+		}
 		for _, valueSpec := range ctx.valueSpecs {
 			for i, name := range valueSpec.Names {
 				memberIdent := cl.getIdent(name)
@@ -1866,6 +1926,9 @@ func (cl *Compiler) compile() (*TextStream, *TextStream) {
 		for _, pkg := range pkgs {
 			cl.currentPkg = pkg
 			ctx := cl.packageContexts[pkg.ID]
+			if !ctx.settings.ExportSource && !ctx.settings.ExportHeader {
+				continue
+			}
 
 			// Namespace
 			// C++ source file (.cpp)
@@ -1964,6 +2027,10 @@ func (cl *Compiler) compile() (*TextStream, *TextStream) {
 		for _, pkg := range pkgs {
 			cl.currentPkg = pkg
 			ctx := cl.packageContexts[pkg.ID]
+
+			if !ctx.settings.ExportSource && !ctx.settings.ExportHeader {
+				continue
+			}
 
 			text.write("namespace ")
 			if ctx.settings.Namespace != "" {

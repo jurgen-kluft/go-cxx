@@ -1,16 +1,18 @@
-package person
+package nperson
 
 import (
 	go_cxx "github.com/jurgen-kluft/go-cxx/core"
-	address "github.com/jurgen-kluft/go-cxx/example/address"
+	naddress "github.com/jurgen-kluft/go-cxx/example/address"
 )
 
 // ---------------------------------------------------
 // Settings of this package for the `go-cxx` compiler
 // ---------------------------------------------------
 var __settings = go_cxx.Settings{
-	Export:    true,
-	Namespace: "nperson",
+	ExportSource: true,
+	ExportHeader: true,
+	IsInstance:   false,
+	Namespace:    "nperson",
 	Includes: []string{
 		"go-cxx-core.h",
 		"go-cxx/cdb/go-cxx-db.h",
@@ -24,7 +26,7 @@ type Person struct {
 	age     int
 	health  float32
 	iq      int
-	address address.Address
+	address naddress.Address
 }
 
 var Population int
@@ -49,11 +51,11 @@ func (p Person) IQ() int {
 	return p.iq
 }
 
-func (p Person) Address() address.Address {
+func (p Person) Address() naddress.Address {
 	return p.address
 }
 
-func (p *Person) SetAddress(a address.Address) {
+func (p *Person) SetAddress(a naddress.Address) {
 	p.address = a
 }
 
