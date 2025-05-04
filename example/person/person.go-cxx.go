@@ -49,6 +49,14 @@ func (p Person) IQ() int {
 	return p.iq
 }
 
+func (p Person) Address() address.Address {
+	return p.address
+}
+
+func (p *Person) SetAddress(a address.Address) {
+	p.address = a
+}
+
 func (p *Person) Grow() {
 	p.age += 1
 }
