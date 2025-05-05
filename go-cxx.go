@@ -1,13 +1,11 @@
 package main
 
 import (
-	"bytes"
 	_ "embed"
 	"fmt"
 	"go/ast"
 	"go/token"
 	"go/types"
-	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -104,20 +102,21 @@ func (ts *TextStream) string() string {
 }
 
 // Package
-//    Imports (become C++ include statements)
-//    Structs
-//    - fields, public and private
-//    - methods, public and private
-//    - TODO: interfaces (C++ abstract classes, inheritance)
-//    Free Functions
-//    Global Variables
-//    Global Constants
-//    Function Pointers
+//    {filename.go}
+//        Imports (can become C++ include statements)
+//        Structs
+//        - Fields, public and private
+//        - Methods, public and private
+//        - TODO: interfaces (C++ abstract classes, inheritance)
+//        Global/Private Functions
+//        Global/Private Variables
+//        Global/Private Constants
+//        Public/Private Function Pointers
 
 // Supported Types
-// - All integers, unsigned integers, floats, strings
-// - Arrays, slices
-// - Maps
+// - All primitive types, integers, unsigned integers, floats, strings
+// - Array
+// - Map
 
 type FunctionInfo struct {
 	Public     bool
@@ -339,8 +338,12 @@ func (s *StructInfo) writeMethodImplementations(text *TextStream, cl *Compiler) 
 	}
 }
 
-type PackageContext struct {
+type GoFile struct {
+	name     string
 	settings *core.Settings
+
+	cppSource *TextStream
+	cppHeader *TextStream
 
 	vars      map[string]*MemberInfo
 	funcPtrs  map[string]*FunctionPtrInfo
@@ -351,23 +354,95 @@ type PackageContext struct {
 	valueSpecs []*ast.ValueSpec
 	funcDecls  []*ast.FuncDecl
 
-	types *types.Info
-
-	//	behaviors     map[types.Object]bool
 	objTypeSpecs  map[types.Object]*ast.TypeSpec
 	objValueSpecs map[types.Object]*ast.ValueSpec
 	objFuncDecls  map[types.Object]*ast.FuncDecl
 }
 
-type Compiler struct {
-	mainPkgPath  string
-	outputPrefix string
+func (gf *GoFile) hasPublicVars() bool {
+	for _, member := range gf.vars {
+		if member.Public {
+			return true
+		}
+	}
+	return false
+}
 
-	cppTypes        map[types.BasicKind]string
-	currentPkg      *packages.Package
+func (gf *GoFile) hasPrivateVars() bool {
+	for _, member := range gf.vars {
+		if !member.Public {
+			return true
+		}
+	}
+	return false
+}
+
+func (gf *GoFile) hasPublicStructs() bool {
+	for _, structInfo := range gf.structs {
+		if structInfo.Public {
+			return true
+		}
+	}
+	return false
+}
+
+func (gf *GoFile) hasPrivateStructs() bool {
+	for _, structInfo := range gf.structs {
+		if !structInfo.Public {
+			return true
+		}
+	}
+	return false
+}
+
+type GoPackage struct {
+	name     string
+	pkg      *packages.Package
+	settings *core.Settings
+	types    *types.Info
+	goFiles  map[string]*GoFile
+}
+
+func newGoPackage(pkg *packages.Package, settings *core.Settings) *GoPackage {
+	return &GoPackage{
+		name:     pkg.Types.Name(),
+		pkg:      pkg,
+		settings: settings,
+		types:    pkg.TypesInfo,
+		goFiles:  make(map[string]*GoFile),
+	}
+}
+
+func (gp *GoPackage) newGoFile(filename string) *GoFile {
+	if goFile, ok := gp.goFiles[filename]; ok {
+		return goFile
+	}
+	goFile := &GoFile{
+		name:          filename,
+		settings:      gp.settings,
+		vars:          make(map[string]*MemberInfo),
+		funcPtrs:      make(map[string]*FunctionPtrInfo),
+		functions:     make(map[string]*FunctionInfo),
+		structs:       make(map[string]*StructInfo),
+		typeSpecs:     make([]*ast.TypeSpec, 0),
+		valueSpecs:    make([]*ast.ValueSpec, 0),
+		funcDecls:     make([]*ast.FuncDecl, 0),
+		objTypeSpecs:  make(map[types.Object]*ast.TypeSpec),
+		objValueSpecs: make(map[types.Object]*ast.ValueSpec),
+		objFuncDecls:  make(map[types.Object]*ast.FuncDecl),
+	}
+	gp.goFiles[filename] = goFile
+	return goFile
+}
+
+type Compiler struct {
+	mainPkgPath     string
+	outputPrefix    string
+	currentGoPkg    *GoPackage
+	currentGoFile   *GoFile
 	fileSet         *token.FileSet
-	nameToPackage   map[string]*packages.Package
-	packageContexts map[string]*PackageContext // map[pkg.ID]*PackageContext
+	cppTypes        map[types.BasicKind]string
+	nameToGoPackage map[string]*GoPackage
 	fieldIndices    map[*types.Var]int
 	methodRenames   map[types.Object]string
 	methodFieldTags map[types.Object]string
@@ -405,8 +480,7 @@ func newCompiler(mainPkgPath string) *Compiler {
 			types.Uint64:       "uint64_t",
 			types.String:       "gx::String",
 		},
-		packageContexts:    make(map[string]*PackageContext),
-		nameToPackage:      make(map[string]*packages.Package),
+		nameToGoPackage:    make(map[string]*GoPackage),
 		fieldIndices:       make(map[*types.Var]int),
 		methodRenames:      make(map[types.Object]string),
 		methodFieldTags:    make(map[types.Object]string),
@@ -433,7 +507,7 @@ func newCompiler(mainPkgPath string) *Compiler {
 // TypeOf returns the type of expression e, or nil if not found.
 // Precondition: the Types, Uses and Defs maps are populated.
 func (cl *Compiler) typesTypeOf(e ast.Expr) (string, types.Type) {
-	for pkgId, pkgCtx := range cl.packageContexts {
+	for pkgId, pkgCtx := range cl.nameToGoPackage {
 		t := pkgCtx.types.TypeOf(e)
 		if t != nil {
 			return pkgId, t
@@ -443,7 +517,7 @@ func (cl *Compiler) typesTypeOf(e ast.Expr) (string, types.Type) {
 }
 
 func (cl *Compiler) typesInstanceOf(id *ast.Ident) (string, types.Instance) {
-	for pkgId, pkgCtx := range cl.packageContexts {
+	for pkgId, pkgCtx := range cl.nameToGoPackage {
 		if inst, ok := pkgCtx.types.Instances[id]; ok {
 			return pkgId, inst
 		}
@@ -452,7 +526,7 @@ func (cl *Compiler) typesInstanceOf(id *ast.Ident) (string, types.Instance) {
 }
 
 func (cl *Compiler) typesObjectOf(id *ast.Ident) (string, types.Object) {
-	for pkgId, pkgCtx := range cl.packageContexts {
+	for pkgId, pkgCtx := range cl.nameToGoPackage {
 		obj := pkgCtx.types.ObjectOf(id)
 		if obj != nil {
 			return pkgId, obj
@@ -462,7 +536,7 @@ func (cl *Compiler) typesObjectOf(id *ast.Ident) (string, types.Object) {
 }
 
 func (cl *Compiler) typesDef(ident *ast.Ident) (string, types.Object) {
-	for pkgId, pkgCtx := range cl.packageContexts {
+	for pkgId, pkgCtx := range cl.nameToGoPackage {
 		obj := pkgCtx.types.Defs[ident]
 		if obj != nil {
 			return pkgId, obj
@@ -472,7 +546,7 @@ func (cl *Compiler) typesDef(ident *ast.Ident) (string, types.Object) {
 }
 
 func (cl *Compiler) typesTypes(ident *ast.Ident) (string, types.TypeAndValue) {
-	for pkgId, pkgCtx := range cl.packageContexts {
+	for pkgId, pkgCtx := range cl.nameToGoPackage {
 		if t, ok := pkgCtx.types.Types[ident]; ok {
 			return pkgId, t
 		}
@@ -481,7 +555,7 @@ func (cl *Compiler) typesTypes(ident *ast.Ident) (string, types.TypeAndValue) {
 }
 
 func (cl *Compiler) typesTypesFromExp(ident ast.Expr) (string, types.TypeAndValue) {
-	for pkgId, pkgCtx := range cl.packageContexts {
+	for pkgId, pkgCtx := range cl.nameToGoPackage {
 		if t, ok := pkgCtx.types.Types[ident]; ok {
 			return pkgId, t
 		}
@@ -490,13 +564,24 @@ func (cl *Compiler) typesTypesFromExp(ident ast.Expr) (string, types.TypeAndValu
 }
 
 func (cl *Compiler) typesUses(ident *ast.Ident) (string, types.Object) {
-	for pkgId, pkgCtx := range cl.packageContexts {
+	for pkgId, pkgCtx := range cl.nameToGoPackage {
 		obj := pkgCtx.types.Uses[ident]
 		if obj != nil {
 			return pkgId, obj
 		}
 	}
 	return "unknown", nil
+}
+
+func (cl *Compiler) getFullyQualifiedName(typ types.Type) string {
+	// Include the package name in the type name if it is not the current package
+	fullyQualifiedName := types.TypeString(typ, QualifierNameOf)
+	packageAndType := strings.Split(fullyQualifiedName, ".")
+	packageName := packageAndType[0]
+	typeName := packageAndType[1]
+
+	// The package name needs to be substituted with the namespace and/or instance specifier
+	return cl.getScope(packageName) + typeName
 }
 
 //
@@ -552,9 +637,9 @@ func (cl *Compiler) getSignatureReturnType(sig *types.Signature) (types.Type, er
 // genTypeExpr generates a C++ type expression for the given Go type.
 // Example: int -> int, *int -> int*, []int -> std::vector<int>
 func (cl *Compiler) genTypeExpr(typ types.Type, pos token.Pos, varName string) string {
-	if result, ok := cl.genTypeExprs[typ]; ok {
-		return result
-	}
+	// if result, ok := cl.genTypeExprs[typ]; ok {
+	// 	return result
+	// }
 
 	builder := &strings.Builder{}
 	switch typ := typ.(type) {
@@ -572,15 +657,7 @@ func (cl *Compiler) genTypeExpr(typ types.Type, pos token.Pos, varName string) s
 		builder.WriteString(cl.genTypeExpr(typ.Elem(), pos, varName))
 		builder.WriteByte('*')
 	case *types.Named:
-		// Include the package name in the type name if it is not the current package
-		fullyQualifiedName := types.TypeString(typ, QualifierNameOf)
-		packageAndType := strings.Split(fullyQualifiedName, ".")
-		packageName := packageAndType[0]
-		typeName := packageAndType[1]
-
-		// The package name needs to be substituted with the namespace and/or instance specifier
-		fullyQualifiedName = cl.getScope(packageName) + typeName
-
+		fullyQualifiedName := cl.getFullyQualifiedName(typ)
 		builder.WriteString(fullyQualifiedName)
 
 		if typeArgs := typ.TypeArgs(); typeArgs != nil {
@@ -710,13 +787,15 @@ func (cl *Compiler) genTypeDefn(typeSpec *ast.TypeSpec) {
 	switch typ := typeSpec.Type.(type) {
 	case *ast.StructType:
 		// Create StructInfo and parse the fields
-		if pkgCtx, ok := cl.packageContexts[cl.currentPkg.ID]; ok {
+		//pkgCtx := cl.currentGoPkg
+		fileCtx := cl.currentGoFile
+		{
 			structName := typeSpec.Name.String()
-			structInfo, ok := pkgCtx.structs[structName]
+			structInfo, ok := fileCtx.structs[structName]
 			if !ok {
 				structPublic := typeSpec.Name.IsExported()
 				structInfo = newStructInfo(structName, structPublic)
-				pkgCtx.structs[structName] = structInfo
+				fileCtx.structs[structName] = structInfo
 			}
 
 			// Parse the struct members
@@ -822,10 +901,10 @@ func (cl *Compiler) genFuncDecl(decl *ast.FuncDecl) string {
 			structPublic := recvNamedType.Obj().Exported()
 			funcPublic := decl.Name.IsExported()
 
-			structInfo := cl.packageContexts[cl.currentPkg.ID].structs[structName]
+			structInfo := cl.currentGoFile.structs[structName]
 			if structInfo == nil {
 				structInfo = newStructInfo(structName, structPublic)
-				cl.packageContexts[cl.currentPkg.ID].structs[structName] = structInfo
+				cl.currentGoFile.structs[structName] = structInfo
 			}
 
 			if _, ok := structInfo.Methods[funcName]; !ok {
@@ -859,7 +938,7 @@ func (cl *Compiler) genFuncDecl(decl *ast.FuncDecl) string {
 		}
 	} else {
 		// A standalone function
-		funcInfo := cl.packageContexts[cl.currentPkg.ID].functions[funcName]
+		funcInfo := cl.currentGoFile.functions[funcName]
 		if funcInfo == nil {
 			funcInfo = newFunctionInfo(decl.Name.IsExported(), funcIsMutating, funcName)
 			funcInfo.Body = decl.Body
@@ -871,7 +950,7 @@ func (cl *Compiler) genFuncDecl(decl *ast.FuncDecl) string {
 				funcInfo.ParamNames = append(funcInfo.ParamNames, param.Name())
 				funcInfo.ParamTypes = append(funcInfo.ParamTypes, cl.genTypeExpr(param.Type(), param.Pos(), ""))
 			}
-			cl.packageContexts[cl.currentPkg.ID].functions[funcName] = funcInfo
+			cl.currentGoFile.functions[funcName] = funcInfo
 		}
 	}
 
@@ -1088,14 +1167,13 @@ func (cl *Compiler) writeSelectorExpr(sel *ast.SelectorExpr, text *TextStream) {
 }
 
 func (cl *Compiler) getScope(pkgName string) string {
-	if pkg, ok := cl.nameToPackage[pkgName]; ok {
-		if pkg.ID != cl.currentPkg.ID {
-			ctx := cl.packageContexts[pkg.ID]
-			if ctx.settings.Namespace != "" {
-				return ctx.settings.Namespace + "::"
+	if pkg, ok := cl.nameToGoPackage[pkgName]; ok {
+		if pkg != cl.currentGoPkg {
+			if pkg.settings.Namespace != "" {
+				return pkg.settings.Namespace + "::"
 			}
-			if ctx.settings.Instance != "" {
-				return ctx.settings.Instance + "."
+			if pkg.settings.Instance != "" {
+				return pkg.settings.Instance + "."
 			}
 		}
 	}
@@ -1596,10 +1674,8 @@ func parseCoreSettings(lit *ast.CompositeLit, settings *core.Settings) {
 	}
 }
 
-func (cl *Compiler) collectPackageSettings(pkg *packages.Package) {
-
-	settings := cl.packageContexts[pkg.ID].settings
-
+func (cl *Compiler) collectPackageSettings(pkg *packages.Package) *core.Settings {
+	settings := core.NewSettings()
 	for _, file := range pkg.Syntax {
 		for _, decl := range file.Decls {
 			switch decl := decl.(type) {
@@ -1613,7 +1689,7 @@ func (cl *Compiler) collectPackageSettings(pkg *packages.Package) {
 								switch valueType := specValue.(type) {
 								case *ast.CompositeLit:
 									parseCoreSettings(valueType, settings)
-									goto settings_found
+									return settings
 								}
 							}
 						}
@@ -1622,13 +1698,13 @@ func (cl *Compiler) collectPackageSettings(pkg *packages.Package) {
 			}
 		}
 	}
-settings_found:
+	return settings
 }
 
 func (cl *Compiler) writeIncludes(text *TextStream) {
 	includeGuard := map[string]bool{}
-	for _, ctx := range cl.packageContexts {
-		for _, include := range ctx.settings.Includes {
+	for _, goPkg := range cl.nameToGoPackage {
+		for _, include := range goPkg.settings.Includes {
 			if _, ok := includeGuard[include]; !ok {
 				includeGuard[include] = true
 				text.writeLn("#include \"" + include + "\"")
@@ -1637,7 +1713,7 @@ func (cl *Compiler) writeIncludes(text *TextStream) {
 	}
 }
 
-func (cl *Compiler) compile() (*TextStream, *TextStream) {
+func (cl *Compiler) compile() bool {
 	// Load main package
 	packagesConfig := &packages.Config{
 		Mode: packages.NeedImports | packages.NeedDeps |
@@ -1648,7 +1724,7 @@ func (cl *Compiler) compile() (*TextStream, *TextStream) {
 		fmt.Fprintln(cl.errors, err)
 	}
 	if len(loadPkgs) == 0 {
-		return newTextStream(0), newTextStream(0)
+		return false
 	}
 	for _, pkg := range loadPkgs {
 		for _, err := range pkg.Errors {
@@ -1660,7 +1736,7 @@ func (cl *Compiler) compile() (*TextStream, *TextStream) {
 		}
 	}
 	if cl.errored() {
-		return newTextStream(0), newTextStream(0)
+		return false
 	}
 	cl.fileSet = loadPkgs[0].Fset
 
@@ -1689,31 +1765,10 @@ func (cl *Compiler) compile() (*TextStream, *TextStream) {
 		return pkgs[i].ID < pkgs[j].ID
 	})
 
-	// Collect packages by name
 	for _, pkg := range pkgs {
-		cl.nameToPackage[pkg.Types.Name()] = pkg
-	}
-
-	for _, pkg := range pkgs {
-		cl.nameToPackage[pkg.Name] = pkg
-		ctx := &PackageContext{
-			settings:      core.NewSettings(pkg.Types.Name()),
-			vars:          map[string]*MemberInfo{},
-			funcPtrs:      map[string]*FunctionPtrInfo{},
-			functions:     map[string]*FunctionInfo{},
-			structs:       map[string]*StructInfo{},
-			types:         pkg.TypesInfo,
-			typeSpecs:     []*ast.TypeSpec{},
-			valueSpecs:    []*ast.ValueSpec{},
-			funcDecls:     []*ast.FuncDecl{},
-			objTypeSpecs:  map[types.Object]*ast.TypeSpec{},
-			objValueSpecs: map[types.Object]*ast.ValueSpec{},
-			objFuncDecls:  map[types.Object]*ast.FuncDecl{},
-		}
-
-		cl.packageContexts[pkg.ID] = ctx
-
-		cl.collectPackageSettings(pkg)
+		settings := cl.collectPackageSettings(pkg)
+		cl.currentGoPkg = newGoPackage(pkg, settings)
+		cl.nameToGoPackage[cl.currentGoPkg.name] = cl.currentGoPkg
 	}
 
 	// Collect exports
@@ -1722,11 +1777,12 @@ func (cl *Compiler) compile() (*TextStream, *TextStream) {
 	// Collect top-level decls and exports in output order
 	{
 		for _, pkg := range pkgs {
-			ctx := cl.packageContexts[pkg.ID]
+			goPkg := cl.nameToGoPackage[pkg.Types.Name()]
+			cl.currentGoPkg = goPkg
 			fmt.Println("Package Scope: " + pkg.Name)
 			for _, file := range pkg.Syntax {
-				fileName := cl.fileSet.Position(file.Pos()).Filename
-				fmt.Println(fileName)
+				fileName := file.Name.Name
+				goFile := goPkg.newGoFile(fileName)
 				for _, decl := range file.Decls {
 					switch decl := decl.(type) {
 					case *ast.GenDecl:
@@ -1734,17 +1790,17 @@ func (cl *Compiler) compile() (*TextStream, *TextStream) {
 							switch spec := spec.(type) {
 							case *ast.TypeSpec:
 								_, def := cl.typesDef(spec.Name)
-								ctx.objTypeSpecs[def] = spec
+								goFile.objTypeSpecs[def] = spec
 							case *ast.ValueSpec:
 								for _, name := range spec.Names {
 									_, def := cl.typesDef(name)
-									ctx.objValueSpecs[def] = spec
+									goFile.objValueSpecs[def] = spec
 								}
 							}
 						}
 					case *ast.FuncDecl:
 						_, def := cl.typesDef(decl.Name)
-						ctx.objFuncDecls[def] = decl
+						goFile.objFuncDecls[def] = decl
 					}
 				}
 			}
@@ -1753,12 +1809,14 @@ func (cl *Compiler) compile() (*TextStream, *TextStream) {
 		typeSpecVisited := map[*ast.TypeSpec]bool{}
 		valueSpecVisited := map[*ast.ValueSpec]bool{}
 		for _, pkg := range pkgs {
-			ctx := cl.packageContexts[pkg.ID]
-			if !ctx.settings.ExportSource && !ctx.settings.ExportHeader {
+			cl.currentGoPkg = cl.nameToGoPackage[pkg.Types.Name()]
+			goPkg := cl.currentGoPkg
+			if !goPkg.settings.ExportSource && !goPkg.settings.ExportHeader {
 				continue
 			}
 
 			for _, file := range pkg.Syntax {
+				goFile := goPkg.goFiles[file.Name.Name]
 				for _, decl := range file.Decls {
 					switch decl := decl.(type) {
 					case *ast.GenDecl:
@@ -1785,7 +1843,7 @@ func (cl *Compiler) compile() (*TextStream, *TextStream) {
 									// 		for _, field := range structType.Fields.List {
 									// 			if field.Names == nil {
 									// 				if ident, ok := field.Type.(*ast.Ident); ok && ident.Name == "Behavior" {
-									// 					ctx.behaviors[obj] = true
+									// 					goPkg.behaviors[obj] = true
 									// 					export = true
 									// 				}
 									// 			}
@@ -1801,14 +1859,14 @@ func (cl *Compiler) compile() (*TextStream, *TextStream) {
 										if ident, ok := node.(*ast.Ident); ok {
 											//cl.types.Uses[ident]
 											_, uses := cl.typesUses(ident)
-											if typeSpec, ok := ctx.objTypeSpecs[uses]; ok {
+											if typeSpec, ok := goFile.objTypeSpecs[uses]; ok {
 												visitTypeSpec(typeSpec, export)
 											}
 										}
 										return true
 									})
 									if !visited {
-										ctx.typeSpecs = append(ctx.typeSpecs, typeSpec)
+										goFile.typeSpecs = append(goFile.typeSpecs, typeSpec)
 									}
 								}
 								visitTypeSpec(spec, false)
@@ -1822,7 +1880,7 @@ func (cl *Compiler) compile() (*TextStream, *TextStream) {
 									ast.Inspect(valueSpec, func(node ast.Node) bool {
 										if ident, ok := node.(*ast.Ident); ok {
 											_, uses := cl.typesUses(ident)
-											if valueSpec, ok := ctx.objValueSpecs[uses]; ok {
+											if valueSpec, ok := goFile.objValueSpecs[uses]; ok {
 												visitValueSpec(valueSpec)
 											}
 										}
@@ -1835,17 +1893,17 @@ func (cl *Compiler) compile() (*TextStream, *TextStream) {
 									// 	}
 									// }
 									// if !extern {
-									// 	ctx.valueSpecs = append(ctx.valueSpecs, valueSpec)
+									// 	goPkg.valueSpecs = append(goPkg.valueSpecs, valueSpec)
 									// }
-									ctx.valueSpecs = append(ctx.valueSpecs, valueSpec)
+									goFile.valueSpecs = append(goFile.valueSpecs, valueSpec)
 								}
 								visitValueSpec(spec)
 							}
 						}
 					case *ast.FuncDecl:
-						ctx.funcDecls = append(ctx.funcDecls, decl)
+						goFile.funcDecls = append(goFile.funcDecls, decl)
 						// if _, ok := cl.namespace[cl.types.Defs[decl.Name]]; !ok {
-						// 	ctx.funcDecls = append(ctx.funcDecls, decl)
+						// 	goPkg.funcDecls = append(goPkg.funcDecls, decl)
 						// }
 					}
 				}
@@ -1855,284 +1913,327 @@ func (cl *Compiler) compile() (*TextStream, *TextStream) {
 
 	// Generate function declarations
 	for _, pkg := range pkgs {
-		cl.currentPkg = pkg
-		ctx := cl.packageContexts[pkg.ID]
-		if !ctx.settings.ExportSource && !ctx.settings.ExportHeader {
+		goPkg := cl.nameToGoPackage[pkg.Types.Name()]
+		cl.currentGoPkg = goPkg
+		if !goPkg.settings.ExportSource && !goPkg.settings.ExportHeader {
 			continue
 		}
-		for _, fd := range ctx.funcDecls {
-			cl.genFuncDecl(fd)
+		for _, goFile := range goPkg.goFiles {
+			cl.currentGoFile = goFile
+			for _, fd := range goFile.funcDecls {
+				cl.genFuncDecl(fd)
+			}
 		}
 	}
 
 	// Generate global variables
 	for _, pkg := range pkgs {
-		cl.currentPkg = pkg
-		ctx := cl.packageContexts[pkg.ID]
-		if !ctx.settings.ExportSource && !ctx.settings.ExportHeader {
+		goPkg := cl.nameToGoPackage[pkg.Types.Name()]
+		cl.currentGoPkg = goPkg
+		if !goPkg.settings.ExportSource && !goPkg.settings.ExportHeader {
 			continue
 		}
-		for _, valueSpec := range ctx.valueSpecs {
-			for i, name := range valueSpec.Names {
-				memberIdent := cl.getIdent(name)
-				var value []string
-				if len(valueSpec.Values) > 0 {
-					text := newTextStream(2)
-					cl.writeExpr(valueSpec.Values[i], text)
-					text.flush()
-					value = text.Lines
+		for _, goFile := range goPkg.goFiles {
+			cl.currentGoFile = goFile
+			for _, valueSpec := range goFile.valueSpecs {
+				for i, name := range valueSpec.Names {
+					memberIdent := cl.getIdent(name)
+					var value []string
+					if len(valueSpec.Values) > 0 {
+						text := newTextStream(2)
+						cl.writeExpr(valueSpec.Values[i], text)
+						text.flush()
+						value = text.Lines
+					}
+					_, typeof := cl.typesTypeOf(valueSpec.Names[i])
+					typeStr := cl.genTypeExpr(typeof, valueSpec.Pos(), "")
+					member := newMemberInfo(memberIdent, typeStr, value)
+					member.Const = name.Obj.Kind == ast.Con
+					goFile.vars[memberIdent] = member
 				}
-				//typeof:=cl.types.TypeOf(valueSpec.Names[i])
-				_, typeof := cl.typesTypeOf(valueSpec.Names[i])
-				typeStr := cl.genTypeExpr(typeof, valueSpec.Pos(), "")
-				member := newMemberInfo(memberIdent, typeStr, value)
-				member.Const = name.Obj.Kind == ast.Con
-				ctx.vars[memberIdent] = member
 			}
 		}
 	}
 
 	// Output C++ source file (.cpp)
-	outputCC := newTextStream(1024)
 	{
-		text := outputCC
-
-		// Macro indicating we're in generated CC
-		text.write("#define __GO_CXX_GENERATED__")
-		text.writeLn()
-		text.writeLn()
-
-		// Includes
-		// C++ source file (.cpp)
-		cl.writeIncludes(text)
-		text.writeLn()
-
 		for _, pkg := range pkgs {
-			cl.currentPkg = pkg
-			ctx := cl.packageContexts[pkg.ID]
-			if !ctx.settings.ExportSource && !ctx.settings.ExportHeader {
+			goPkg := cl.nameToGoPackage[pkg.Types.Name()]
+			cl.currentGoPkg = goPkg
+			if !goPkg.settings.ExportSource && !goPkg.settings.ExportHeader {
 				continue
 			}
 
-			// Namespace
-			// C++ source file (.cpp)
-			text.write("namespace ")
-			if ctx.settings.Namespace != "" {
-				text.writeLn(ctx.settings.Namespace)
-			} else {
-				text.writeLn(pkg.Types.Name())
-			}
-			text.writeLn("{")
-			text.blockStart()
+			for _, goFile := range goPkg.goFiles {
+				cl.currentGoFile = goFile
 
-			// Types
-			// C++ source file (.cpp)
-			text.writeLn("//", "// Types", "//")
-			for _, typeSpec := range ctx.typeSpecs {
-				cl.genTypeDefn(typeSpec)
-				if typeDecl := cl.genTypeDecl(typeSpec); typeDecl != "" {
-					text.write(typeDecl)
-					text.write(";")
+				goFile.cppSource = newTextStream(1024)
+				text := goFile.cppSource
+
+				// Macro indicating we're in generated CC
+				text.write("#define __GO_CXX_" + strings.ToUpper(goFile.name) + "_GENERATED__")
+				text.writeLn()
+				text.writeLn()
+
+				// Includes
+				// C++ source file (.cpp)
+				cl.writeIncludes(text)
+				text.writeLn()
+
+				// Namespace
+				// C++ source file (.cpp)
+				text.writeLn("namespace " + goPkg.settings.Namespace)
+				text.writeLn("{")
+				text.blockStart()
+
+				// Types
+				// C++ source file (.cpp)
+				if len(goFile.typeSpecs) > 0 {
+					text.writeLn("//", "// Types", "//")
+					for _, typeSpec := range goFile.typeSpecs {
+						cl.genTypeDefn(typeSpec)
+						if typeDecl := cl.genTypeDecl(typeSpec); typeDecl != "" {
+							text.write(typeDecl)
+							text.write(";")
+							text.writeLn()
+						}
+					}
+				}
+
+				// Function declarations (private)
+				// C++ source file (.cpp)
+				if len(goFile.funcDecls) > 0 {
 					text.writeLn()
+					text.writeLn()
+					text.writeLn("//", "// Function declarations", "//")
+					for _, fn := range goFile.functions {
+						if fn.Public {
+							fn.writeImpl(text, cl)
+						} else {
+							fn.writeDecl(text)
+							fn.writeImpl(text, cl)
+						}
+					}
 				}
-			}
 
-			// Function declarations (private)
-			// C++ source file (.cpp)
-			text.writeLn()
-			text.writeLn()
-			text.writeLn("//", "// Function declarations", "//")
-			for _, fn := range ctx.functions {
-				if fn.Public {
-					fn.writeImpl(text, cl)
-				} else {
-					fn.writeDecl(text)
-					fn.writeImpl(text, cl)
+				// Variables (only private)
+				// C++ source file (.cpp)
+				if goFile.hasPrivateVars() {
+					text.writeLn()
+					text.writeLn()
+					text.writeLn("//", "// Variables", "//")
+					for _, v := range goFile.vars {
+						if !v.Public {
+							text.write("static ")
+							v.writeDecl(text)
+						}
+					}
 				}
-			}
 
-			// Variables (only private?)
-			// C++ source file (.cpp)
-			text.writeLn()
-			text.writeLn()
-			text.writeLn("//", "// Variables", "//")
-			for _, v := range ctx.vars {
-				if !v.Public {
-					text.write("static ")
-					v.writeDecl(text)
+				// Method implementations
+				// C++ source file (.cpp)
+				if goFile.hasPublicStructs() {
+					text.writeLn()
+					text.writeLn()
+					text.writeLn("//", "// Public types, method implementations", "//")
+					for _, s := range goFile.structs {
+						if s.Public {
+							// Header file has declarations
+							// Now we write the implementations
+							s.writeMethodImplementations(text, cl)
+						}
+					}
 				}
-			}
 
-			// Method implementations
-			// C++ source file (.cpp)
-			text.writeLn()
-			text.writeLn()
-			text.writeLn("//", "// Type method implementations", "//")
-			for _, s := range ctx.structs {
-				if s.Public {
-					// Header file has declarations
-					// Now we write the implementations
-					s.writeMethodImplementations(text, cl)
-				} else {
-					// The structure was not public in the package, so it can stay
-					// at the source file level.
-					s.writeDecl(text)
-					s.writeMethodImplementations(text, cl)
+				if goFile.hasPrivateStructs() {
+					text.writeLn()
+					text.writeLn()
+					text.writeLn("//", "// Private types", "//")
+					for _, s := range goFile.structs {
+						if !s.Public {
+							// The structure was not public in the package, so it can be fully at the source file level.
+							s.writeDecl(text)
+							s.writeMethodImplementations(text, cl)
+						}
+					}
 				}
-			}
 
-			text.blockEnd()
-			text.writeLn("}")
+				text.blockEnd()
+				text.writeLn("}")
+			}
 		}
 	}
 
 	// Output C++ header file (.h)
-	outputHH := newTextStream(1024)
 	{
-		text := outputHH
-
-		// `#pragma once`
-		text.write("#pragma once")
-		text.writeLn()
-		text.writeLn()
-
-		// Don't re-define in generated CC
-		text.write("#ifndef __GO_CXX_GENERATED__")
-		text.writeLn()
-		text.writeLn()
-
-		// Includes
-		// C++ header file (.h)
-		cl.writeIncludes(text)
-		text.writeLn()
-
 		// Namespace for every package
 		// C++ header file (.h)
 		for _, pkg := range pkgs {
-			cl.currentPkg = pkg
-			ctx := cl.packageContexts[pkg.ID]
-
-			if !ctx.settings.ExportSource && !ctx.settings.ExportHeader {
+			goPkg := cl.nameToGoPackage[pkg.Types.Name()]
+			cl.currentGoPkg = goPkg
+			if !goPkg.settings.ExportSource && !goPkg.settings.ExportHeader {
 				continue
 			}
 
-			text.write("namespace ")
-			if ctx.settings.Namespace != "" {
-				text.writeLn(ctx.settings.Namespace)
-			} else {
-				text.writeLn(pkg.Types.Name())
-			}
-			text.writeLn("{")
-			text.blockStart()
+			for _, goFile := range goPkg.goFiles {
+				cl.currentGoFile = goFile
 
-			// Types
-			// C++ header file (.h)
-			text.writeLn("//", "// Types", "//")
-			for _, typeSpec := range ctx.typeSpecs {
-				if typeDecl := cl.genTypeDecl(typeSpec); typeDecl != "" {
-					text.write(typeDecl)
-					text.writeLn(";")
+				goFile.cppHeader = newTextStream(1024)
+				text := goFile.cppHeader
+
+				// `#pragma once`
+				text.write("#pragma once")
+				text.writeLn()
+				text.writeLn()
+
+				// Don't re-define in generated CC
+				text.write("#ifndef __GO_CXX_" + strings.ToUpper(goFile.name) + "_GENERATED__")
+				text.writeLn()
+				text.writeLn()
+
+				// Includes
+				// C++ header file (.h)
+				cl.writeIncludes(text)
+				text.writeLn()
+
+				text.writeLn("namespace " + goPkg.settings.Namespace)
+				text.writeLn("{")
+				text.blockStart()
+
+				// Types
+				// C++ header file (.h)
+				if len(goFile.typeSpecs) > 0 {
+					text.writeLn("//", "// Types", "//")
+					for _, typeSpec := range goFile.typeSpecs {
+						if typeDecl := cl.genTypeDecl(typeSpec); typeDecl != "" {
+							text.write(typeDecl)
+							text.writeLn(";")
+						}
+					}
 				}
-			}
 
-			// Variables
-			// C++ header file (.h)
-			text.writeLn()
-			text.writeLn()
-			text.writeLn("//", "// Variables", "//")
-			text.writeLn()
-			for _, memberInfo := range ctx.vars {
-				if memberInfo.Public {
-					memberInfo.writeDecl(text)
+				// Variables
+				// C++ header file (.h)
+				if goFile.hasPublicVars() {
+					text.writeLn()
+					text.writeLn()
+					text.writeLn("//", "// Variables", "//")
+					text.writeLn()
+					for _, memberInfo := range goFile.vars {
+						if memberInfo.Public {
+							memberInfo.writeDecl(text)
+						}
+					}
 				}
-			}
 
-			// Function declarations (public)
-			// C++ header file (.h)
-			text.writeLn()
-			text.writeLn()
-			text.writeLn("//", "// Function declarations", "//")
-			for _, fn := range ctx.functions {
-				fn.writeDecl(text)
-			}
-
-			// Structure (type) declarations (public)
-			// C++ header file (.h)
-			text.writeLn()
-			text.writeLn()
-			text.writeLn("//", "// Struct declarations", "//")
-			for _, s := range ctx.structs {
-				if s.Public {
-					s.writeDecl(text)
+				// Function declarations (public)
+				// C++ header file (.h)
+				if len(goFile.funcDecls) > 0 {
+					text.writeLn()
+					text.writeLn()
+					text.writeLn("//", "// Function declarations", "//")
+					for _, fn := range goFile.functions {
+						fn.writeDecl(text)
+					}
 				}
-			}
 
-			// Closing namespace
-			text.blockEnd()
-			text.writeLn("}")
+				// Structure (type) declarations (public)
+				// C++ header file (.h)
+				if goFile.hasPublicStructs() {
+					text.writeLn()
+					text.writeLn()
+					text.writeLn("//", "// Struct declarations", "//")
+					for _, s := range goFile.structs {
+						if s.Public {
+							s.writeDecl(text)
+						}
+					}
+				}
+
+				// Closing namespace
+				text.blockEnd()
+				text.writeLn("}")
+
+				// Closing `#ifndef __GO_CXX_GENERATED__`
+				text.writeLn()
+				text.writeLn("#endif")
+			}
 		}
-
-		// Closing `#ifndef __GO_CXX_GENERATED__`
-		text.writeLn()
-		text.writeLn("#endif")
 	}
 
-	return outputCC, outputHH
+	return true
 }
 
-//
 // Main
-//
-
-// TODO: this should be a configuration of a package to export
-//
-//go:embed gx.hh
-var gxHH string
-
 func main() {
-	// Arguments
 	nArgs := len(os.Args)
 	if nArgs < 1 {
 		fmt.Println("usage: go-cxx <main_package_path>")
 		return
 	}
-	mainPkgPath := os.Args[1]
 
-	// Compile
-	cl := newCompiler(mainPkgPath)
-	outputCC, outputHH := cl.compile()
-
-	// Emit
-	if cl.errored() {
+	cl := newCompiler(os.Args[1]) // Create compiler
+	if !cl.compile() {            // Compile and exit if there were errors
 		fmt.Println(cl.errors)
 		os.Exit(1)
-	} else {
-		readersEqual := func(a, b io.Reader) bool {
-			bufA := make([]byte, 1024)
-			bufB := make([]byte, 1024)
-			for {
-				nA, errA := io.ReadFull(a, bufA)
-				nB, _ := io.ReadFull(b, bufB)
-				if !bytes.Equal(bufA[:nA], bufB[:nB]) {
-					return false
-				}
-				if errA == io.EOF {
-					return true
-				}
-			}
-		}
-		writeFileIfChanged := func(path string, contents string) {
-			byteContents := []byte(contents)
-			if f, err := os.Open(path); err == nil {
-				defer f.Close()
-				if readersEqual(f, bytes.NewReader(byteContents)) {
-					return
-				}
-			}
-			os.WriteFile(path, byteContents, 0644)
-		}
-		writeFileIfChanged(filepath.Dir(cl.outputPrefix)+"/go-cxx.hh", gxHH)
-		writeFileIfChanged(cl.outputPrefix+".go-cxx.cc", outputCC.string())
-		writeFileIfChanged(cl.outputPrefix+".go-cxx.hh", outputHH.string())
 	}
+
+	// Emit all .cpp and .h files
+	for _, pkg := range cl.nameToGoPackage {
+		for _, goFile := range pkg.goFiles {
+			if goFile.settings.ExportHeader && goFile.cppHeader != nil {
+				fileName := goFile.settings.OutputPrefix + goFile.name + ".h"
+				content := goFile.cppHeader.string()
+				exportFile(fileName, content)
+			}
+			if goFile.settings.ExportSource && goFile.cppSource != nil {
+				fileName := goFile.settings.OutputPrefix + goFile.name + ".cpp"
+				content := goFile.cppSource.string()
+				exportFile(fileName, content)
+			}
+		}
+	}
+}
+
+func exportFile(fileName string, content string) {
+	// Write C++ source file
+	// If there is an existing file on disk, compare the content
+	// and only overwrite if different
+
+	out := os.Stdout
+	errors := os.Stderr
+
+	if err := os.MkdirAll(filepath.Dir(fileName), 0755); err != nil {
+		fmt.Fprintf(errors, "error creating directory %s: %v\n", fileName, err)
+		return
+	}
+
+	// Check if file exists
+	if _, err := os.Stat(fileName); err == nil {
+		// File exists, compare content
+		existingContent, err := os.ReadFile(fileName)
+		if err != nil {
+			fmt.Fprintf(errors, "error reading file %s: %v\n", fileName, err)
+			return
+		}
+		if string(existingContent) == content {
+			fmt.Fprintf(out, "File %s is up to date\n", fileName)
+			return
+		}
+
+		// File exists and content is different, overwrite
+		fmt.Fprintf(out, "File %s exists and is different, overwriting\n", fileName)
+	} else if !os.IsNotExist(err) {
+		// Error checking file existence
+		fmt.Fprintf(errors, "error checking file %s: %v\n", fileName, err)
+		return
+	}
+
+	// Write new content to file
+	if err := os.WriteFile(fileName, []byte(content), 0644); err != nil {
+		fmt.Fprintf(errors, "error writing file %s: %v\n", fileName, err)
+		return
+	}
+
+	fmt.Fprintf(out, "Wrote file %s\n", fileName)
 }

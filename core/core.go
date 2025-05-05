@@ -18,13 +18,13 @@ type Settings struct {
 	Includes     []string // List of includes to be added to the C++ code
 }
 
-func NewSettings(namespace string) *Settings {
+func NewSettings() *Settings {
 	return &Settings{
-		ExportSource: false,
-		ExportHeader: false,
-		Instance:     "", // e.g. Serial.
-		Namespace:    namespace,
-		OutputPrefix: "__demo__",
-		Includes:     []string{},
+		ExportSource: false,      //
+		ExportHeader: false,      //
+		Instance:     "",         // e.g. "Serial"
+		Namespace:    "",         // e.g. "nfoo"
+		OutputPrefix: "",         //
+		Includes:     []string{}, //
 	}
 }
