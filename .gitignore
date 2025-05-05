@@ -4,6 +4,7 @@
 
 #ignore the following folders
 /output
+/compiler/output
 /vendor
 
 #except the following files

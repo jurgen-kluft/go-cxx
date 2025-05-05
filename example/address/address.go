@@ -9,30 +9,27 @@ var __settings = go_cxx.Settings{
 	ExportSource: true,
 	ExportHeader: true,
 	Namespace:    "naddress",
-	Includes: []string{
-		"go-cxx-core.h",
-		"go-cxx/cdb/go-cxx-db.h",
-	},
+	Includes:     []string{},
 }
 
 // ---------------------------------------------------
 // ---------------------------------------------------
 
 type Address struct {
-	nameOfCity string
-	postalCode int
-	street     string
-	number     int
-	private    bool
+	nameOfCity     string
+	postalCode     int
+	street         string
+	number         int
+	privateAddress bool
 }
 
 func NewAddress(city string, postalCode int, street string, number int) Address {
 	return Address{
-		nameOfCity: city,
-		postalCode: postalCode,
-		street:     street,
-		number:     number,
-		private:    false,
+		nameOfCity:     city,
+		postalCode:     postalCode,
+		street:         street,
+		number:         number,
+		privateAddress: false,
 	}
 }
 
@@ -53,5 +50,5 @@ func (a Address) Number() int {
 }
 
 func (a Address) isPrivate() bool {
-	return a.private
+	return a.privateAddress
 }

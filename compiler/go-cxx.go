@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -101,13 +102,14 @@ func (ts *TextStream) string() string {
 	return strings.Join(ts.Lines, "\n")
 }
 
-// Package
-//    {filename.go}
+// Go Package
+//    {Go file}
 //        Imports (can become C++ include statements)
 //        Structs
 //        - Fields, public and private
 //        - Methods, public and private
 //        - TODO: interfaces (C++ abstract classes, inheritance)
+//        - TODO: things like Print(var_args ...any)
 //        Global/Private Functions
 //        Global/Private Variables
 //        Global/Private Constants
@@ -121,6 +123,7 @@ func (ts *TextStream) string() string {
 type FunctionInfo struct {
 	Public     bool
 	Const      bool
+	Method     bool
 	Name       string
 	ReturnType string
 	ParamNames []string
@@ -128,10 +131,11 @@ type FunctionInfo struct {
 	Body       *ast.BlockStmt
 }
 
-func newFunctionInfo(public bool, mutating bool, name string) *FunctionInfo {
+func newFunctionInfo(public bool, mutating bool, method bool, name string) *FunctionInfo {
 	return &FunctionInfo{
 		Public:     public,
 		Const:      !mutating,
+		Method:     method,
 		Name:       name,
 		ReturnType: "void",
 		ParamNames: make([]string, 0),
@@ -153,7 +157,7 @@ func (fn FunctionInfo) writeDecl(text *TextStream) {
 		text.write(" ")
 		text.write(fn.ParamNames[i])
 	}
-	if fn.Const {
+	if fn.Const && fn.Method {
 		text.writeLn(") const;")
 	} else {
 		text.writeLn(");")
@@ -210,7 +214,7 @@ func newMemberInfo(name string, typ string, value []string) *MemberInfo {
 	return &MemberInfo{
 		Public: true,
 		Name:   name,
-		Type:   typ,
+		Type:   strings.TrimSpace(typ),
 		Value:  value,
 	}
 }
@@ -344,6 +348,7 @@ type GoFile struct {
 
 	cppSource *TextStream
 	cppHeader *TextStream
+	includes  []string
 
 	vars      map[string]*MemberInfo
 	funcPtrs  map[string]*FunctionPtrInfo
@@ -357,6 +362,45 @@ type GoFile struct {
 	objTypeSpecs  map[types.Object]*ast.TypeSpec
 	objValueSpecs map[types.Object]*ast.ValueSpec
 	objFuncDecls  map[types.Object]*ast.FuncDecl
+}
+
+func (gf *GoFile) getIncludeGuardIdentifier() string {
+	id := strings.ToUpper(gf.name)
+	id = strings.ReplaceAll(id, "/", "_")
+	return "__GO_CXX_" + id + "_GENERATED__"
+
+}
+
+func (gf *GoFile) registerInclude(include string) {
+	if slices.Contains(gf.includes, include) {
+		return
+	}
+	gf.includes = append(gf.includes, include)
+}
+
+// mapInsert is a helper function to insert a key-value pair into a map, and return
+// whether the key was already present in the map. It returns false if the key was
+// already present and thus not inserted, and true if it was inserted.
+func mapInsert[Map ~map[K]V, K comparable, V any](m Map, key K, value V) (ok bool) {
+	if _, ok = m[key]; !ok {
+		m[key] = value
+	}
+	return !ok
+}
+
+func (gf *GoFile) writeIncludes(text *TextStream) {
+	includeGuard := map[string]bool{} // Do not include the same file multiple times
+
+	for _, include := range gf.settings.Includes {
+		if mapInsert(includeGuard, include, true) {
+			text.writeLn("#include \"" + include + "\"")
+		}
+	}
+	for _, include := range gf.includes {
+		if mapInsert(includeGuard, include, true) {
+			text.writeLn("#include \"" + include + "\"")
+		}
+	}
 }
 
 func (gf *GoFile) hasPublicVars() bool {
@@ -417,9 +461,13 @@ func (gp *GoPackage) newGoFile(filename string) *GoFile {
 	if goFile, ok := gp.goFiles[filename]; ok {
 		return goFile
 	}
+
 	goFile := &GoFile{
 		name:          filename,
-		settings:      gp.settings,
+		settings:      gp.settings, // default behavior; a GoFile inherits the settings of the GoPackage
+		cppSource:     nil,
+		cppHeader:     nil,
+		includes:      make([]string, 0),
 		vars:          make(map[string]*MemberInfo),
 		funcPtrs:      make(map[string]*FunctionPtrInfo),
 		functions:     make(map[string]*FunctionInfo),
@@ -478,7 +526,7 @@ func newCompiler(mainPkgPath string) *Compiler {
 			types.Uint16:       "uint16_t",
 			types.Uint32:       "uint32_t",
 			types.Uint64:       "uint64_t",
-			types.String:       "gx::String",
+			types.String:       "string",
 		},
 		nameToGoPackage:    make(map[string]*GoPackage),
 		fieldIndices:       make(map[*types.Var]int),
@@ -581,7 +629,18 @@ func (cl *Compiler) getFullyQualifiedName(typ types.Type) string {
 	typeName := packageAndType[1]
 
 	// The package name needs to be substituted with the namespace and/or instance specifier
-	return cl.getScope(packageName) + typeName
+	if goPkg, ok := cl.nameToGoPackage[packageName]; ok {
+		if goPkg != cl.currentGoPkg {
+			if goPkg.settings.Namespace != "" {
+				return goPkg.settings.Namespace + "::" + typeName
+			}
+			if goPkg.settings.Instance != "" {
+				return goPkg.settings.Instance + "." + typeName
+			}
+		}
+	}
+	return typeName
+
 }
 
 //
@@ -732,7 +791,9 @@ func (cl *Compiler) genTypeDecl(typeSpec *ast.TypeSpec) string {
 		// Example: typedef int (*FuncType)(int, int);
 		builder.WriteString("typedef ")
 		_, typ := cl.typesTypeOf(typeSpec.Type)
+
 		// Return type
+		// TODO what if the return type is a struct type, we need a fully qualified name
 		returnType, _ := cl.getSignatureReturnType(typ.(*types.Signature))
 		builder.WriteString(returnType.String())
 		builder.WriteString(" (*")
@@ -911,7 +972,7 @@ func (cl *Compiler) genFuncDecl(decl *ast.FuncDecl) string {
 				// In Go a method can be defined on a pointer or a value
 				// receiver. In C++ we can make this function const if the
 				// receiver is a value receiver.
-				funcInfo := newFunctionInfo(funcPublic, funcIsMutating, funcName)
+				funcInfo := newFunctionInfo(funcPublic, funcIsMutating, true, funcName)
 				if sig.Results() != nil && sig.Results().Len() == 1 {
 					// Get the full return type as was used in the source code
 					// e.g. func Name(a int) address.Address {}
@@ -922,14 +983,18 @@ func (cl *Compiler) genFuncDecl(decl *ast.FuncDecl) string {
 					// Get the return type from the signature
 					// This results in 'Address'
 					funcInfo.ReturnType = cl.genTypeExpr(sig.Results().At(0).Type(), decl.Type.Results.Pos(), "")
+					funcInfo.ReturnType = strings.TrimSpace(funcInfo.ReturnType)
 
 					// Now find the name of the package to prepend to the type
 
 				}
 				for i, nParams := 0, sig.Params().Len(); i < nParams; i++ {
 					param := sig.Params().At(i)
-					funcInfo.ParamNames = append(funcInfo.ParamNames, param.Name())
-					funcInfo.ParamTypes = append(funcInfo.ParamTypes, cl.genTypeExpr(param.Type(), param.Pos(), ""))
+					paramName := param.Name()
+					paramType := cl.genTypeExpr(param.Type(), param.Pos(), "")
+					paramType = strings.TrimSpace(paramType)
+					funcInfo.ParamNames = append(funcInfo.ParamNames, paramName)
+					funcInfo.ParamTypes = append(funcInfo.ParamTypes, paramType)
 				}
 
 				funcInfo.Body = decl.Body
@@ -940,7 +1005,7 @@ func (cl *Compiler) genFuncDecl(decl *ast.FuncDecl) string {
 		// A standalone function
 		funcInfo := cl.currentGoFile.functions[funcName]
 		if funcInfo == nil {
-			funcInfo = newFunctionInfo(decl.Name.IsExported(), funcIsMutating, funcName)
+			funcInfo = newFunctionInfo(decl.Name.IsExported(), false, false, funcName)
 			funcInfo.Body = decl.Body
 			if sig.Results() != nil && sig.Results().Len() == 1 {
 				funcInfo.ReturnType = cl.genTypeExpr(sig.Results().At(0).Type(), decl.Type.Results.Pos(), "")
@@ -1149,25 +1214,36 @@ func (cl *Compiler) writeParenExpr(bin *ast.ParenExpr, text *TextStream) {
 func (cl *Compiler) writeSelectorExpr(sel *ast.SelectorExpr, text *TextStream) {
 	_, typeof := cl.typesTypeOf(sel.X)
 	if basic, ok := typeof.(*types.Basic); !(ok && basic.Kind() == types.Invalid) {
-		// if _, ok := cl.types.TypeOf(sel.X).(*types.Pointer); ok {
-		// 	cl.writeExpr(sel.X, text)
-		// } else {
-		// 	cl.writeExpr(sel.X, text)
-		// }
+		// TODO: do we really need this ?
 		text.write("this->")
 	}
 
 	// Prefix with namespace and/or instance specifier
 	if sel.X != nil {
-		pkgName := sel.X.(*ast.Ident).Name
-		text.write(cl.getScope(pkgName))
+		// pkgName := sel.X.(*ast.Ident).Name
+		// scope := cl.getScope(pkgName)
+		scope := cl.getScopeFromExpr(sel.X)
+		identifier := cl.getIdent(sel.Sel)
+		text.write(scope)
+		text.write(identifier)
+	} else {
+		identifier := cl.getIdent(sel.Sel)
+		text.write(identifier)
 	}
-
-	text.write(cl.getIdent(sel.Sel))
 }
 
-func (cl *Compiler) getScope(pkgName string) string {
-	if pkg, ok := cl.nameToGoPackage[pkgName]; ok {
+func (cl *Compiler) getScopeFromExpr(expr ast.Expr) string {
+	selector := ""
+	switch expr := expr.(type) {
+	case *ast.SelectorExpr:
+		selector = expr.Sel.Name
+	case *ast.Ident:
+		selector = expr.Name
+	default:
+		return ""
+	}
+
+	if pkg, ok := cl.nameToGoPackage[selector]; ok {
 		if pkg != cl.currentGoPkg {
 			if pkg.settings.Namespace != "" {
 				return pkg.settings.Namespace + "::"
@@ -1240,13 +1316,13 @@ func (cl *Compiler) writeCallExpr(call *ast.CallExpr, text *TextStream) {
 				_, instance := cl.typesInstanceOf(fun)
 				typeArgs = instance.TypeArgs
 			case *ast.SelectorExpr: // pkg.f(...)
-
 				// Prefix with namespace and/or instance specifier
-				if fun.Sel != nil {
-					pkgName := fun.X.(*ast.Ident).Name
-					text.write(cl.getScope(pkgName))
-				}
-
+				// if fun.Sel != nil {
+				// 	pkgName := fun.X.(*ast.Ident).Name
+				// 	text.write(cl.getScope(pkgName))
+				// }
+				scope := cl.getScopeFromExpr(fun.X)
+				text.write(scope)
 				text.write(cl.getIdent(fun.Sel))
 				_, instance := cl.typesInstanceOf(fun.Sel)
 				typeArgs = instance.TypeArgs
@@ -1701,18 +1777,6 @@ func (cl *Compiler) collectPackageSettings(pkg *packages.Package) *core.Settings
 	return settings
 }
 
-func (cl *Compiler) writeIncludes(text *TextStream) {
-	includeGuard := map[string]bool{}
-	for _, goPkg := range cl.nameToGoPackage {
-		for _, include := range goPkg.settings.Includes {
-			if _, ok := includeGuard[include]; !ok {
-				includeGuard[include] = true
-				text.writeLn("#include \"" + include + "\"")
-			}
-		}
-	}
-}
-
 func (cl *Compiler) getFilename(file *ast.File, cwd string) string {
 	fileName := cl.fileSet.Position(file.Pos()).Filename
 	// Make relative to the current directory
@@ -1732,7 +1796,14 @@ func (cl *Compiler) compile() bool {
 		Mode: packages.NeedImports | packages.NeedDeps |
 			packages.NeedTypes | packages.NeedSyntax | packages.NeedTypesInfo,
 	}
+	// Get the parent of the current working directory
 	currentDir, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintln(cl.errors, err)
+		return false
+	}
+	currentDir = filepath.Dir(currentDir)
+
 	loadPkgs, err := packages.Load(packagesConfig, cl.mainPkgPath)
 	if err != nil {
 		fmt.Fprintln(cl.errors, err)
@@ -1927,6 +1998,22 @@ func (cl *Compiler) compile() bool {
 		}
 	}
 
+	// Generate type definitions and declarations
+	for _, pkg := range pkgs {
+		goPkg := cl.nameToGoPackage[pkg.Types.Name()]
+		cl.currentGoPkg = goPkg
+		if !goPkg.settings.ExportSource && !goPkg.settings.ExportHeader {
+			continue
+		}
+		for _, goFile := range goPkg.goFiles {
+			cl.currentGoFile = goFile
+			for _, typeSpec := range goFile.typeSpecs {
+				cl.genTypeDefn(typeSpec)
+				cl.genTypeDecl(typeSpec)
+			}
+		}
+	}
+
 	// Generate function declarations
 	for _, pkg := range pkgs {
 		goPkg := cl.nameToGoPackage[pkg.Types.Name()]
@@ -1971,6 +2058,47 @@ func (cl *Compiler) compile() bool {
 		}
 	}
 
+	// When we are using a type as a return type, function parameter, variable, field, etc..,
+	// we need to identify where the type comes from so that we can update our list of include
+	// files.
+
+	typeOrigin := map[string]string{}
+
+	// Populate the typeOrigin map with the basic primitives, since they have a known origin
+	typeOrigin["void"] = "core/core"
+	for _, typ := range cl.cppTypes {
+		typeOrigin[typ] = "core/core"
+	}
+
+	// Populate the typeOrigin map with the types from the packages
+	for _, pkg := range pkgs {
+		goPkg := cl.nameToGoPackage[pkg.Types.Name()]
+		for _, goFile := range goPkg.goFiles {
+			for _, s := range goFile.structs {
+				if _, ok := typeOrigin[s.Name]; !ok {
+					typeOrigin[s.Name] = goFile.name
+					typeOrigin[goPkg.name+"::"+s.Name] = goFile.name
+				}
+			}
+		}
+	}
+
+	// Identify the types used in each go file that are not local to that file and update its include file list
+	for _, goPkg := range cl.nameToGoPackage {
+		for _, goFile := range goPkg.goFiles {
+			for _, s := range goFile.structs {
+				for _, m := range s.Members {
+					if _, ok := typeOrigin[m.Type]; ok {
+						include := typeOrigin[m.Type]
+						if include != goFile.name {
+							goFile.registerInclude(include + ".h")
+						}
+					}
+				}
+			}
+		}
+	}
+
 	// Output C++ source file (.cpp)
 	{
 		for _, pkg := range pkgs {
@@ -1986,14 +2114,15 @@ func (cl *Compiler) compile() bool {
 				goFile.cppSource = newTextStream(1024)
 				text := goFile.cppSource
 
-				// Macro indicating we're in generated CC
-				text.write("#define __GO_CXX_" + strings.ToUpper(goFile.name) + "_GENERATED__")
-				text.writeLn()
-				text.writeLn()
+				text.writeLn("// ========================================================")
+				text.writeLn("// Generated by go-cxx, please do not edit.")
+				text.writeLn("// ========================================================")
 
 				// Includes
 				// C++ source file (.cpp)
-				cl.writeIncludes(text)
+				goFile.writeIncludes(text)
+				// Source file includes its own header file
+				text.writeLn("#include \"" + goFile.name + ".h\"")
 				text.writeLn()
 
 				// Namespace
@@ -2103,13 +2232,14 @@ func (cl *Compiler) compile() bool {
 				text.writeLn()
 
 				// Don't re-define in generated CC
-				text.write("#ifndef __GO_CXX_" + strings.ToUpper(goFile.name) + "_GENERATED__")
+				text.writeLn("#ifndef " + goFile.getIncludeGuardIdentifier())
+				text.writeLn("#define " + goFile.getIncludeGuardIdentifier())
 				text.writeLn()
 				text.writeLn()
 
 				// Includes
 				// C++ header file (.h)
-				cl.writeIncludes(text)
+				goFile.writeIncludes(text)
 				text.writeLn()
 
 				text.writeLn("namespace " + goPkg.settings.Namespace)
@@ -2170,7 +2300,7 @@ func (cl *Compiler) compile() bool {
 				text.blockEnd()
 				text.writeLn("}")
 
-				// Closing `#ifndef __GO_CXX_GENERATED__`
+				// Closing include guard
 				text.writeLn()
 				text.writeLn("#endif")
 			}

@@ -13,10 +13,7 @@ var __settings = go_cxx.Settings{
 	ExportHeader: true,
 	Instance:     "",
 	Namespace:    "nperson",
-	Includes: []string{
-		"go-cxx-core.h",
-		"go-cxx/cdb/go-cxx-db.h",
-	},
+	Includes:     []string{},
 }
 
 // ---------------------------------------------------

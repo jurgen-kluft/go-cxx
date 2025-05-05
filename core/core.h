@@ -1,0 +1,3 @@
+
+
+typedef const char* string;
