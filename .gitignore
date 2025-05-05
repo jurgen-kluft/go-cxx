@@ -1,8 +1,10 @@
-#ignore all files
+#ignore all files and folders
 *
 !*/
 
-vendor/
+#ignore the following folders
+/output
+/vendor
 
 #except the following files
 !*.cpp
@@ -37,7 +39,6 @@ vendor/
 !.clang-format
 !.clangd
 !.editorconfig
-
 
 #except the following folders
 .vscode/settings.json

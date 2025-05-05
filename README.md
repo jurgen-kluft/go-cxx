@@ -1,6 +1,10 @@
 # Go to C++
 
-WIP
+## TODO
+
+- When handling a go file, used types that are in another package or go file should be detected so that we know which include files to add.
+- Function parameters that are a struct type should be emitted as `const Type&` instead of `Type` to avoid copying the object.
+- Const functions that return a struct type should be emitted as `const Type&` instead of `Type` to avoid copying the object.
 
 ## Example: A Go struct
 

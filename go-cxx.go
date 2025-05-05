@@ -1713,12 +1713,26 @@ func (cl *Compiler) writeIncludes(text *TextStream) {
 	}
 }
 
+func (cl *Compiler) getFilename(file *ast.File, cwd string) string {
+	fileName := cl.fileSet.Position(file.Pos()).Filename
+	// Make relative to the current directory
+	if strings.HasPrefix(fileName, cwd) {
+		fileName = fileName[len(cwd)+1:]
+	}
+	// Remove the ".go" extension
+	if strings.HasSuffix(fileName, ".go") {
+		fileName = fileName[:len(fileName)-3]
+	}
+	return fileName
+}
+
 func (cl *Compiler) compile() bool {
 	// Load main package
 	packagesConfig := &packages.Config{
 		Mode: packages.NeedImports | packages.NeedDeps |
 			packages.NeedTypes | packages.NeedSyntax | packages.NeedTypesInfo,
 	}
+	currentDir, err := os.Getwd()
 	loadPkgs, err := packages.Load(packagesConfig, cl.mainPkgPath)
 	if err != nil {
 		fmt.Fprintln(cl.errors, err)
@@ -1781,8 +1795,9 @@ func (cl *Compiler) compile() bool {
 			cl.currentGoPkg = goPkg
 			fmt.Println("Package Scope: " + pkg.Name)
 			for _, file := range pkg.Syntax {
-				fileName := file.Name.Name
-				goFile := goPkg.newGoFile(fileName)
+				// Get the name of the go file
+				goFileName := cl.getFilename(file, currentDir)
+				goFile := goPkg.newGoFile(goFileName)
 				for _, decl := range file.Decls {
 					switch decl := decl.(type) {
 					case *ast.GenDecl:
@@ -1816,7 +1831,8 @@ func (cl *Compiler) compile() bool {
 			}
 
 			for _, file := range pkg.Syntax {
-				goFile := goPkg.goFiles[file.Name.Name]
+				goFilename := cl.getFilename(file, currentDir)
+				goFile := goPkg.goFiles[goFilename]
 				for _, decl := range file.Decls {
 					switch decl := decl.(type) {
 					case *ast.GenDecl:
@@ -2182,14 +2198,14 @@ func main() {
 	for _, pkg := range cl.nameToGoPackage {
 		for _, goFile := range pkg.goFiles {
 			if goFile.settings.ExportHeader && goFile.cppHeader != nil {
-				fileName := goFile.settings.OutputPrefix + goFile.name + ".h"
+				relFilePath := "output/" + goFile.name + ".h"
 				content := goFile.cppHeader.string()
-				exportFile(fileName, content)
+				exportFile(relFilePath, content)
 			}
 			if goFile.settings.ExportSource && goFile.cppSource != nil {
-				fileName := goFile.settings.OutputPrefix + goFile.name + ".cpp"
+				relFilePath := "output/" + goFile.name + ".cpp"
 				content := goFile.cppSource.string()
-				exportFile(fileName, content)
+				exportFile(relFilePath, content)
 			}
 		}
 	}

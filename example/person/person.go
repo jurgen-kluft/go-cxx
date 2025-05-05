@@ -27,6 +27,7 @@ type Person struct {
 	health  float32
 	iq      int
 	address naddress.Address
+	secret  Secret
 }
 
 var Population int
@@ -36,6 +37,7 @@ func NewPerson(age int, health float32, iq int) Person {
 		age:    age,
 		health: health,
 		iq:     iq,
+		secret: Secret{},
 	}
 }
 
@@ -57,6 +59,14 @@ func (p Person) Address() naddress.Address {
 
 func (p *Person) SetAddress(a naddress.Address) {
 	p.address = a
+}
+
+func (p Person) Secret() Secret {
+	return p.secret
+}
+
+func (p *Person) SetSecret(s Secret) {
+	p.secret = s
 }
 
 func (p *Person) Grow() {
