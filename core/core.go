@@ -23,7 +23,7 @@ func NewSettings() *Settings {
 		ExportSource: false,      //
 		ExportHeader: false,      //
 		Instance:     "",         // e.g. "Serial"
-		Namespace:    "",         // e.g. "nfoo"
+		Namespace:    "ngo_cxx",  // e.g. "nfoo"
 		OutputPrefix: "",         //
 		Includes:     []string{}, //
 	}

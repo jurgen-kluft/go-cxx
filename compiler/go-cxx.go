@@ -668,7 +668,7 @@ func trimFinalSpace(s string) string {
 func (cl *Compiler) generateIdentifier(prefix string) string {
 	cl.genIdentifierCount++
 	builder := &strings.Builder{}
-	builder.WriteString("gx__")
+	builder.WriteString("ncore__")
 	builder.WriteString(prefix)
 	builder.WriteString(strconv.Itoa(cl.genIdentifierCount))
 	return builder.String()
@@ -708,7 +708,6 @@ func (cl *Compiler) genTypeExpr(typ types.Type, pos token.Pos, varName string) s
 		} else {
 			cl.errorf(pos, "%s not supported", typ.String())
 		}
-		builder.WriteByte(' ')
 	case *types.Pointer:
 		if typ, ok := typ.Elem().(*types.Basic); ok && typ.Kind() == types.String {
 			builder.WriteString("const ")
@@ -729,23 +728,19 @@ func (cl *Compiler) genTypeExpr(typ types.Type, pos token.Pos, varName string) s
 			}
 			builder.WriteString(">")
 		}
-		builder.WriteByte(' ')
 	case *types.TypeParam:
 		// TODO: namespace ?
 		builder.WriteString(typ.Obj().Name())
-		builder.WriteByte(' ')
 	case *types.Array:
-		builder.WriteString("gx::Array<")
+		builder.WriteString("array_t<")
 		builder.WriteString(trimFinalSpace(cl.genTypeExpr(typ.Elem(), pos, varName)))
 		builder.WriteString(", ")
 		builder.WriteString(strconv.FormatInt(typ.Len(), 10))
 		builder.WriteString(">")
-		builder.WriteByte(' ')
 	case *types.Slice:
-		builder.WriteString("gx::Slice<")
+		builder.WriteString("slice_t<")
 		builder.WriteString(trimFinalSpace(cl.genTypeExpr(typ.Elem(), pos, varName)))
 		builder.WriteString(">")
-		builder.WriteByte(' ')
 	case *types.Signature:
 		// C++ Function Pointer
 		// Example: typedef int (*FuncType)(int, int);
@@ -806,6 +801,7 @@ func (cl *Compiler) genTypeDecl(typeSpec *ast.TypeSpec) string {
 				}
 				param := sig.Params().At(i)
 				builder.WriteString(cl.genTypeExpr(param.Type(), param.Pos(), ""))
+				builder.WriteString(" ")
 				builder.WriteString(param.Name())
 			}
 		}
@@ -1131,7 +1127,7 @@ func (cl *Compiler) writeFuncLit(lit *ast.FuncLit, text *TextStream) {
 }
 
 func (cl *Compiler) writeCompositeLit(lit *ast.CompositeLit, text *TextStream) {
-	useParens := true
+	useParens := false
 	_, typeof := cl.typesTypeOf(lit)
 	typeExpr := (cl.genTypeExpr(typeof, lit.Pos(), ""))
 	if useParens {
@@ -1490,7 +1486,7 @@ func (cl *Compiler) writeAssignStmt(assignStmt *ast.AssignStmt, text *TextStream
 		//typ := cl.types.TypeOf(assignStmt.Rhs[0])
 		_, typ := cl.typesTypeOf(assignStmt.Rhs[0])
 		if typ, ok := typ.(*types.Basic); ok && typ.Kind() == types.String {
-			text.write("gx::String ")
+			text.write("string ")
 		} else {
 			text.write("auto ")
 		}
@@ -1512,8 +1508,8 @@ func (cl *Compiler) writeAssignStmt(assignStmt *ast.AssignStmt, text *TextStream
 }
 
 func (cl *Compiler) writeDeferStmt(deferStmt *ast.DeferStmt, text *TextStream) {
-	text.write("gx::Defer ")
-	text.write(cl.generateIdentifier("Defer"))
+	text.write("ncore::defer_t ")
+	text.write(cl.generateIdentifier("__defer"))
 	text.write("([&](){")
 	text.writeLn()
 	text.blockStart()
@@ -1673,6 +1669,9 @@ func (cl *Compiler) writeStmt(stmt ast.Stmt, text *TextStream) string {
 		cl.writeRangeStmt(stmt, text)
 	case *ast.DeclStmt:
 		cl.writeDeclStmt(stmt, text)
+	case *ast.SwitchStmt:
+		// TODO: Implement switch statement
+		cl.errorf(stmt.Pos(), "unsupported statement type")
 	default:
 		cl.errorf(stmt.Pos(), "unsupported statement type")
 	}
@@ -2050,6 +2049,10 @@ func (cl *Compiler) compile() bool {
 					}
 					_, typeof := cl.typesTypeOf(valueSpec.Names[i])
 					typeStr := cl.genTypeExpr(typeof, valueSpec.Pos(), "")
+					if goPkg.name != "ngo_cxx" && typeStr == "ngo_cxx::Settings" {
+						continue
+					}
+
 					member := newMemberInfo(memberIdent, typeStr, value)
 					member.Const = name.Obj.Kind == ast.Con
 					goFile.vars[memberIdent] = member
