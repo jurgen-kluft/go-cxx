@@ -1,20 +1,5 @@
 package naddress
 
-// ---------------------------------------------------
-// Settings of this package for the `go-cxx` compiler
-// ---------------------------------------------------
-import go_cxx "github.com/jurgen-kluft/go-cxx/core"
-
-var __settings = go_cxx.Settings{
-	ExportSource: true,
-	ExportHeader: true,
-	Namespace:    "naddress",
-	Includes:     []string{},
-}
-
-// ---------------------------------------------------
-// ---------------------------------------------------
-
 type Address struct {
 	nameOfCity     string
 	postalCode     int
@@ -33,6 +18,16 @@ func NewAddress(city string, postalCode int, street string, number int) Address 
 	}
 }
 
+func (a Address) isLuckyNumber() bool {
+	switch a.number {
+	case 4:
+		return false
+	case 13:
+		return false
+	}
+	return true
+}
+
 func (a Address) NameOfCity() string {
 	return a.nameOfCity
 }
@@ -45,10 +40,29 @@ func (a Address) Street() string {
 	return a.street
 }
 
+func (a *Address) SetPrivateAddress() {
+	a.privateAddress = true
+}
+
 func (a Address) Number() int {
-	return a.number
+	return a.number + 1
+}
+
+func (a *Address) SetNumber(number int, p bool) {
+	a.number = number
+	a.privateAddress = p
 }
 
 func (a Address) isPrivate() bool {
 	return a.privateAddress
+}
+
+func Test() {
+	a := NewAddress("Shanghai", 1010, "Big square", 6)
+	a.NameOfCity()
+	a.PostalCode()
+	a.Street()
+	a.Number()
+	a.SetPrivateAddress()
+	a.SetNumber(42, true)
 }

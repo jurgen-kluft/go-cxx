@@ -4,12 +4,13 @@
 
 - Function parameters that are a struct type should be emitted as `const Type&` instead of `Type` to avoid copying the object.
 - Const functions that return a struct type should be emitted as `const Type&` instead of `Type` to avoid copying the object.
+- Figure out how to generate constructors for structs. For example, all `new(Person).Constructor(...)`, `new(Person).Constructor2(...)`, should be used to generate
+  constructors for `struct Person` in C++. So the pattern is `varname := new(Type).ConstructorN` in Go should be replaced with `varname = new Type(...)` in C++.
+
+### Done
+
 - Support exporting switch statements
 
-- Figure out how to generate constructors for structs. For example, all `NewPerson1(...)`, `NewPerson2(...)`, should be used to generate
-  constructors for `struct Person` in C++. Any site that uses `NewPerson1(...)`, `NewPerson2(...)` should be replaced with using the
-  constructor on `Person` in C++.
-  So the pattern is `varname := New<Type>` in Go should be replaced with `varname = Type(...)` in C++.
 
 ## Example: A Go struct
 

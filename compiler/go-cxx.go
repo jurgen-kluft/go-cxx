@@ -207,16 +207,28 @@ type MemberInfo struct {
 	Const  bool
 	Name   string
 	Type   string
-	Value  []string // default value
+	Value  string // default value
 }
 
-func newMemberInfo(name string, typ string, value []string) *MemberInfo {
+func newMemberInfo(name string, typ string, value string) *MemberInfo {
 	return &MemberInfo{
 		Public: true,
 		Name:   name,
 		Type:   strings.TrimSpace(typ),
 		Value:  value,
 	}
+}
+
+func (m MemberInfo) writeConstructor(n int, text *TextStream) {
+	if n == 0 {
+		text.write(": ")
+	} else {
+		text.write(", ")
+	}
+	text.write(m.Name)
+	text.write("(")
+	text.write(m.Value)
+	text.write(")")
 }
 
 func (m MemberInfo) writeDecl(text *TextStream) {
@@ -226,15 +238,8 @@ func (m MemberInfo) writeDecl(text *TextStream) {
 	text.write(m.Type)
 	text.write(" ")
 	text.write(m.Name)
-	if len(m.Value) > 0 {
-		text.write(" = ")
-		for i, l := range m.Value {
-			if i > 0 {
-				text.writeLn()
-			}
-			text.write(l)
-		}
-	}
+	text.write(" = ")
+	text.write(m.Value)
 	text.writeLn(";")
 }
 
@@ -447,11 +452,12 @@ type GoPackage struct {
 	goFiles  map[string]*GoFile
 }
 
-func newGoPackage(pkg *packages.Package, settings *core.Settings) *GoPackage {
+func newGoPackage(pkg *packages.Package) *GoPackage {
+	name := pkg.Types.Name()
 	return &GoPackage{
-		name:     pkg.Types.Name(),
+		name:     name,
 		pkg:      pkg,
-		settings: settings,
+		settings: core.NewSettings(name),
 		types:    pkg.TypesInfo,
 		goFiles:  make(map[string]*GoFile),
 	}
@@ -484,21 +490,22 @@ func (gp *GoPackage) newGoFile(filename string) *GoFile {
 }
 
 type Compiler struct {
-	mainPkgPath     string
-	outputPrefix    string
-	currentGoPkg    *GoPackage
-	currentGoFile   *GoFile
-	fileSet         *token.FileSet
-	cppTypes        map[types.BasicKind]string
-	nameToGoPackage map[string]*GoPackage
-	fieldIndices    map[*types.Var]int
-	methodRenames   map[types.Object]string
-	methodFieldTags map[types.Object]string
-	genTypeExprs    map[types.Type]string
-	genTypeDecls    map[*ast.TypeSpec]string
-	genTypeDefns    map[*ast.TypeSpec]string
-	genTypeMetas    map[*ast.TypeSpec]string
-	genFuncDecls    map[*ast.FuncDecl]string
+	mainPkgPath          string
+	outputPrefix         string
+	currentGoPkg         *GoPackage
+	currentGoFile        *GoFile
+	fileSet              *token.FileSet
+	cppTypes             map[types.BasicKind]string
+	cppTypeDefaultValues map[types.BasicKind]string
+	nameToGoPackage      map[string]*GoPackage
+	fieldIndices         map[*types.Var]int
+	methodRenames        map[types.Object]string
+	methodFieldTags      map[types.Object]string
+	genTypeExprs         map[types.Type]string
+	genTypeDecls         map[*ast.TypeSpec]string
+	genTypeDefns         map[*ast.TypeSpec]string
+	genTypeMetas         map[*ast.TypeSpec]string
+	genFuncDecls         map[*ast.FuncDecl]string
 
 	genIdentifierCount int
 
@@ -528,6 +535,25 @@ func newCompiler(mainPkgPath string) *Compiler {
 			types.Uint64:       "uint64_t",
 			types.String:       "string",
 		},
+		cppTypeDefaultValues: map[types.BasicKind]string{
+			types.Bool:         "false",
+			types.UntypedBool:  "false",
+			types.Float32:      "0.0f",
+			types.UntypedFloat: "0.0f",
+			types.Float64:      "0.0",
+			types.Int:          "0",
+			types.UntypedInt:   "0",
+			types.Int8:         "0",
+			types.Int16:        "0",
+			types.Int32:        "0",
+			types.Int64:        "0",
+			types.Uint:         "0",
+			types.Uint8:        "0",
+			types.Uint16:       "0",
+			types.Uint32:       "0",
+			types.Uint64:       "0",
+			types.String:       "\"\"",
+		},
 		nameToGoPackage:    make(map[string]*GoPackage),
 		fieldIndices:       make(map[*types.Var]int),
 		methodRenames:      make(map[types.Object]string),
@@ -542,73 +568,63 @@ func newCompiler(mainPkgPath string) *Compiler {
 	}
 }
 
-// Types:      map[ast.Expr]types.TypeAndValue{},
-// Instances:  map[*ast.Ident]types.Instance{},
-// Defs:       map[*ast.Ident]types.Object{},
-// Uses:       map[*ast.Ident]types.Object{},
-// Implicits:  map[ast.Node]types.Object{},
-// Selections: map[*ast.SelectorExpr]*types.Selection{},
-// Scopes:     map[ast.Node]*types.Scope{},
-
-// We go through the Compiler to find any of the above maps.
-
 // TypeOf returns the type of expression e, or nil if not found.
 // Precondition: the Types, Uses and Defs maps are populated.
-func (cl *Compiler) typesTypeOf(e ast.Expr) (string, types.Type) {
-	for pkgId, pkgCtx := range cl.nameToGoPackage {
+func (cl *Compiler) typesTypeOf(e ast.Expr) types.Type {
+	for _, pkgCtx := range cl.nameToGoPackage {
 		t := pkgCtx.types.TypeOf(e)
 		if t != nil {
-			return pkgId, t
+			return t
 		}
 	}
-	return "unknown", nil
+	return nil
 }
 
-func (cl *Compiler) typesInstanceOf(id *ast.Ident) (string, types.Instance) {
-	for pkgId, pkgCtx := range cl.nameToGoPackage {
+func (cl *Compiler) typesInstanceOf(id *ast.Ident) types.Instance {
+	for _, pkgCtx := range cl.nameToGoPackage {
 		if inst, ok := pkgCtx.types.Instances[id]; ok {
-			return pkgId, inst
+			return inst
 		}
 	}
-	return "unknown", types.Instance{}
+	return types.Instance{}
 }
 
-func (cl *Compiler) typesObjectOf(id *ast.Ident) (string, types.Object) {
-	for pkgId, pkgCtx := range cl.nameToGoPackage {
+func (cl *Compiler) typesObjectOf(id *ast.Ident) types.Object {
+	for _, pkgCtx := range cl.nameToGoPackage {
 		obj := pkgCtx.types.ObjectOf(id)
 		if obj != nil {
-			return pkgId, obj
+			return obj
 		}
 	}
-	return "unknown", nil
+	return nil
 }
 
-func (cl *Compiler) typesDef(ident *ast.Ident) (string, types.Object) {
-	for pkgId, pkgCtx := range cl.nameToGoPackage {
+func (cl *Compiler) typesDef(ident *ast.Ident) types.Object {
+	for _, pkgCtx := range cl.nameToGoPackage {
 		obj := pkgCtx.types.Defs[ident]
 		if obj != nil {
-			return pkgId, obj
+			return obj
 		}
 	}
-	return "unknown", nil
+	return nil
 }
 
-func (cl *Compiler) typesTypes(ident *ast.Ident) (string, types.TypeAndValue) {
-	for pkgId, pkgCtx := range cl.nameToGoPackage {
+func (cl *Compiler) typesTypes(ident *ast.Ident) types.TypeAndValue {
+	for _, pkgCtx := range cl.nameToGoPackage {
 		if t, ok := pkgCtx.types.Types[ident]; ok {
-			return pkgId, t
+			return t
 		}
 	}
-	return "unknown", types.TypeAndValue{}
+	return types.TypeAndValue{}
 }
 
-func (cl *Compiler) typesTypesFromExp(ident ast.Expr) (string, types.TypeAndValue) {
-	for pkgId, pkgCtx := range cl.nameToGoPackage {
+func (cl *Compiler) typesTypesFromExp(ident ast.Expr) types.TypeAndValue {
+	for _, pkgCtx := range cl.nameToGoPackage {
 		if t, ok := pkgCtx.types.Types[ident]; ok {
-			return pkgId, t
+			return t
 		}
 	}
-	return "unknown", types.TypeAndValue{}
+	return types.TypeAndValue{}
 }
 
 func (cl *Compiler) typesUses(ident *ast.Ident) (string, types.Object) {
@@ -785,7 +801,7 @@ func (cl *Compiler) genTypeDecl(typeSpec *ast.TypeSpec) string {
 		// C++ Function Pointer
 		// Example: typedef int (*FuncType)(int, int);
 		builder.WriteString("typedef ")
-		_, typ := cl.typesTypeOf(typeSpec.Type)
+		typ := cl.typesTypeOf(typeSpec.Type)
 
 		// Return type
 		// TODO what if the return type is a struct type, we need a fully qualified name
@@ -811,7 +827,7 @@ func (cl *Compiler) genTypeDecl(typeSpec *ast.TypeSpec) string {
 		builder.WriteString("using ")
 		builder.WriteString(typeSpec.Name.String())
 		builder.WriteString(" = ")
-		_, typ := cl.typesTypeOf(typeSpec.Type)
+		typ := cl.typesTypeOf(typeSpec.Type)
 		builder.WriteString(trimFinalSpace(cl.genTypeExpr(typ, typeSpec.Type.Pos(), "")))
 	}
 
@@ -857,15 +873,21 @@ func (cl *Compiler) genTypeDefn(typeSpec *ast.TypeSpec) {
 
 			// Parse the struct members
 			for _, field := range typ.Fields.List {
-				if _, fieldType := cl.typesTypeOf(field.Type); fieldType != nil {
-					var defaultVal []string
+				if fieldType := cl.typesTypeOf(field.Type); fieldType != nil {
+
+					typeExpr := cl.genTypeExpr(fieldType, field.Type.Pos(), "")
+
+					var defaultVal string
 					if tag := field.Tag; tag != nil && tag.Kind == token.STRING {
 						unquoted, _ := strconv.Unquote(tag.Value)
 						tagValue := reflect.StructTag(unquoted).Get("default")
-						defaultVal = append(defaultVal, strings.Split(tagValue, "\n")...)
+						defaultVal = tagValue
+					} else if fieldType, ok := fieldType.(*types.Basic); ok {
+						defaultVal = cl.cppTypeDefaultValues[fieldType.Kind()]
+					} else {
+						defaultVal = typeExpr + "()"
 					}
 
-					typeExpr := cl.genTypeExpr(fieldType, field.Type.Pos(), "")
 					for _, fieldName := range field.Names {
 						member := newMemberInfo(fieldName.String(), typeExpr, defaultVal)
 						member.Public = fieldName.IsExported()
@@ -896,7 +918,7 @@ func (cl *Compiler) genFuncDecl(decl *ast.FuncDecl) string {
 	}
 
 	// TODO Do we need the package Id that is returned here ?
-	_, obj := cl.typesDef(decl.Name)
+	obj := cl.typesDef(decl.Name)
 	sig := obj.Type().(*types.Signature)
 	recv := sig.Recv()
 
@@ -1058,17 +1080,13 @@ func (cl *Compiler) genFuncDecl(decl *ast.FuncDecl) string {
 // ----------------------------------------------------------
 
 func (cl *Compiler) getIdent(ident *ast.Ident) string {
-	_, typ := cl.typesTypes(ident)
+	typ := cl.typesTypes(ident)
 	if typ.IsNil() {
 		return "nullptr"
 	}
 	if typ.IsBuiltin() {
-		return "gx::"
+		return "ncore::"
 	}
-
-	// if ext, ok := cl.namespace[cl.types.Uses[ident]]; ok {
-	// 	return ext
-	// }
 
 	// TODO: Package namespace
 	typName := types.TypeString(typ.Type, QualifierNameOf)
@@ -1096,7 +1114,7 @@ func (cl *Compiler) getBasicLit(lit *ast.BasicLit) string {
 }
 
 func (cl *Compiler) writeFuncLit(lit *ast.FuncLit, text *TextStream) {
-	_, t := cl.typesTypeOf(lit)
+	t := cl.typesTypeOf(lit)
 	sig := t.(*types.Signature)
 	if text.Indent == 0 {
 		text.write("[](")
@@ -1128,7 +1146,7 @@ func (cl *Compiler) writeFuncLit(lit *ast.FuncLit, text *TextStream) {
 
 func (cl *Compiler) writeCompositeLit(lit *ast.CompositeLit, text *TextStream) {
 	useParens := false
-	_, typeof := cl.typesTypeOf(lit)
+	typeof := cl.typesTypeOf(lit)
 	typeExpr := (cl.genTypeExpr(typeof, lit.Pos(), ""))
 	if useParens {
 		text.write(trimFinalSpace(typeExpr))
@@ -1139,7 +1157,7 @@ func (cl *Compiler) writeCompositeLit(lit *ast.CompositeLit, text *TextStream) {
 	}
 	if len(lit.Elts) > 0 {
 		if _, ok := lit.Elts[0].(*ast.KeyValueExpr); ok {
-			_, typeof = cl.typesTypeOf(lit)
+			typeof = cl.typesTypeOf(lit)
 			if typ, ok := typeof.Underlying().(*types.Struct); ok {
 				// Fields
 				if nFields := typ.NumFields(); nFields != 0 {
@@ -1155,7 +1173,7 @@ func (cl *Compiler) writeCompositeLit(lit *ast.CompositeLit, text *TextStream) {
 				// Check field order
 				lastIndex := 0
 				for _, elt := range lit.Elts {
-					_, objof := cl.typesObjectOf(elt.(*ast.KeyValueExpr).Key.(*ast.Ident))
+					objof := cl.typesObjectOf(elt.(*ast.KeyValueExpr).Key.(*ast.Ident))
 					field := objof.(*types.Var)
 
 					if index := cl.fieldIndices[field]; index < lastIndex {
@@ -1208,7 +1226,7 @@ func (cl *Compiler) writeParenExpr(bin *ast.ParenExpr, text *TextStream) {
 }
 
 func (cl *Compiler) writeSelectorExpr(sel *ast.SelectorExpr, text *TextStream) {
-	_, typeof := cl.typesTypeOf(sel.X)
+	typeof := cl.typesTypeOf(sel.X)
 	if basic, ok := typeof.(*types.Basic); !(ok && basic.Kind() == types.Invalid) {
 		// TODO: do we really need this ?
 		text.write("this->")
@@ -1253,7 +1271,7 @@ func (cl *Compiler) getScopeFromExpr(expr ast.Expr) string {
 }
 
 func (cl *Compiler) writeIndexExpr(ind *ast.IndexExpr, text *TextStream) {
-	_, typeof := cl.typesTypeOf(ind.X)
+	typeof := cl.typesTypeOf(ind.X)
 	if _, ok := typeof.(*types.Pointer); ok {
 		text.write("gx::deref(")
 		cl.writeExpr(ind.X, text)
@@ -1269,8 +1287,7 @@ func (cl *Compiler) writeIndexExpr(ind *ast.IndexExpr, text *TextStream) {
 func (cl *Compiler) writeCallExpr(call *ast.CallExpr, text *TextStream) {
 	method := false
 
-	//funType := cl.types.Types[call.Fun]
-	_, funType := cl.typesTypesFromExp(call.Fun)
+	funType := cl.typesTypesFromExp(call.Fun)
 
 	if _, ok := funType.Type.Underlying().(*types.Signature); ok || funType.IsBuiltin() {
 		// Function or method
@@ -1278,6 +1295,19 @@ func (cl *Compiler) writeCallExpr(call *ast.CallExpr, text *TextStream) {
 			_, obj := cl.typesUses(sel.Sel)
 			if sig, ok := obj.Type().(*types.Signature); ok && sig.Recv() != nil {
 				method = true
+
+				typeof := cl.typesTypeOf(sel.X)
+				_, xPtr := typeof.(*types.Pointer)
+				//_, recvPtr := sig.Recv().Type().(*types.Pointer)
+
+				if xPtr {
+					cl.writeExpr(sel.X, text)
+					text.write("->")
+				} else {
+					cl.writeExpr(sel.X, text)
+					text.write(".")
+				}
+
 				if rename, ok := cl.methodRenames[obj]; ok {
 					text.write(rename)
 				} else {
@@ -1288,20 +1318,18 @@ func (cl *Compiler) writeCallExpr(call *ast.CallExpr, text *TextStream) {
 					text.write(fieldTag)
 					text.write("{}, ")
 				}
-				_, typeof := cl.typesTypeOf(sel.X)
-				_, xPtr := typeof.(*types.Pointer)
-				_, recvPtr := sig.Recv().Type().(*types.Pointer)
-				if xPtr && !recvPtr {
-					text.write("gx::deref(")
-					cl.writeExpr(sel.X, text)
-					text.write(")")
-				} else if !xPtr && recvPtr {
-					text.write("&(")
-					cl.writeExpr(sel.X, text)
-					text.write(")")
-				} else {
-					cl.writeExpr(sel.X, text)
-				}
+
+				// if xPtr && !recvPtr {
+				// 	text.write("gx::deref(")
+				// 	cl.writeExpr(sel.X, text)
+				// 	text.write(")")
+				// } else if !xPtr && recvPtr {
+				// 	text.write("&(")
+				// 	cl.writeExpr(sel.X, text)
+				// 	text.write(")")
+				// } else {
+				// 	cl.writeExpr(sel.X, text)
+				// }
 			}
 		}
 		if !method {
@@ -1309,7 +1337,7 @@ func (cl *Compiler) writeCallExpr(call *ast.CallExpr, text *TextStream) {
 			switch fun := call.Fun.(type) {
 			case *ast.Ident: // f(...)
 				text.write(cl.getIdent(fun))
-				_, instance := cl.typesInstanceOf(fun)
+				instance := cl.typesInstanceOf(fun)
 				typeArgs = instance.TypeArgs
 			case *ast.SelectorExpr: // pkg.f(...)
 				// Prefix with namespace and/or instance specifier
@@ -1320,17 +1348,17 @@ func (cl *Compiler) writeCallExpr(call *ast.CallExpr, text *TextStream) {
 				scope := cl.getScopeFromExpr(fun.X)
 				text.write(scope)
 				text.write(cl.getIdent(fun.Sel))
-				_, instance := cl.typesInstanceOf(fun.Sel)
+				instance := cl.typesInstanceOf(fun.Sel)
 				typeArgs = instance.TypeArgs
 			case *ast.IndexExpr:
 				switch fun := fun.X.(type) {
 				case *ast.Ident: // f[T](...)
 					text.write(cl.getIdent(fun))
-					_, instance := cl.typesInstanceOf(fun)
+					instance := cl.typesInstanceOf(fun)
 					typeArgs = instance.TypeArgs
 				case *ast.SelectorExpr: // pkg.f[T](...)
 					text.write(cl.getIdent(fun.Sel))
-					_, instance := cl.typesInstanceOf(fun.Sel)
+					instance := cl.typesInstanceOf(fun.Sel)
 					typeArgs = instance.TypeArgs
 				}
 			default:
@@ -1363,7 +1391,7 @@ func (cl *Compiler) writeCallExpr(call *ast.CallExpr, text *TextStream) {
 		text.write("(")
 	}
 	for i, arg := range call.Args {
-		if i > 0 || method {
+		if i > 0 {
 			text.write(", ")
 		}
 		cl.writeExpr(arg, text)
@@ -1382,7 +1410,7 @@ func (cl *Compiler) writeUnaryExpr(un *ast.UnaryExpr, text *TextStream) {
 	case token.ADD, token.SUB, token.NOT:
 		text.write(op.String())
 	case token.AND:
-		_, t := cl.typesTypesFromExp(un.X)
+		t := cl.typesTypesFromExp(un.X)
 		if !t.Addressable() {
 			cl.errorf(un.OpPos, "cannot take address of a temporary object")
 		}
@@ -1483,8 +1511,7 @@ func (cl *Compiler) writeAssignStmt(assignStmt *ast.AssignStmt, text *TextStream
 		return
 	}
 	if assignStmt.Tok == token.DEFINE {
-		//typ := cl.types.TypeOf(assignStmt.Rhs[0])
-		_, typ := cl.typesTypeOf(assignStmt.Rhs[0])
+		typ := cl.typesTypeOf(assignStmt.Rhs[0])
 		if typ, ok := typ.(*types.Basic); ok && typ.Kind() == types.String {
 			text.write("string ")
 		} else {
@@ -1543,7 +1570,11 @@ func (cl *Compiler) writeBranchStmt(branchStmt *ast.BranchStmt, text *TextStream
 func (cl *Compiler) writeBlockStmt(block *ast.BlockStmt, text *TextStream) {
 	text.writeLn("{")
 	text.blockStart()
-	cl.writeStmtList(block.List, text)
+	//cl.writeStmtList(block.List, text)
+	for _, stmt := range block.List {
+		cl.writeStmt(stmt, text)
+		text.writeLn()
+	}
 	text.blockEnd()
 	text.writeLn("}")
 }
@@ -1645,18 +1676,72 @@ func (cl *Compiler) writeDeclStmt(declStmt *ast.DeclStmt, text *TextStream) {
 	// }
 }
 
+func (cl *Compiler) writeSwitchStmt(switchStmt *ast.SwitchStmt, text *TextStream) {
+	text.write("switch (")
+	if switchStmt.Init != nil {
+		cl.writeStmt(switchStmt.Init, text)
+		text.write("; ")
+	}
+	if switchStmt.Tag != nil {
+		cl.writeExpr(switchStmt.Tag, text)
+		text.writeLn(") ")
+	} else {
+		text.writeLn(") ")
+	}
+
+	if switchStmt.Body != nil {
+		cl.writeBlockStmt(switchStmt.Body, text)
+	} else {
+		text.writeLn("{")
+		text.writeLn("}")
+	}
+}
+
+func (cl *Compiler) writeCaseStmt(caseStmt *ast.CaseClause, text *TextStream) {
+
+	text.write("case ")
+	if len(caseStmt.List) > 0 {
+		for i, expr := range caseStmt.List {
+			if i > 0 {
+				text.write(", ")
+			}
+			cl.writeExpr(expr, text)
+		}
+	} else {
+		text.write("default")
+	}
+	text.writeLn(":")
+	text.writeLn("{")
+	text.blockStart()
+
+	for _, stmt := range caseStmt.Body {
+		cl.writeStmt(stmt, text)
+	}
+
+	// TODO detect if we have written a return statement, if so, don't write a break statement
+	text.writeLn()
+	text.writeLn("break;")
+
+	text.blockEnd()
+	text.writeLn("}")
+}
+
 func (cl *Compiler) writeStmt(stmt ast.Stmt, text *TextStream) string {
 	switch stmt := stmt.(type) {
 	case *ast.ExprStmt:
 		cl.writeExprStmt(stmt, text)
+		text.write(";")
 	case *ast.IncDecStmt:
 		cl.writeIncDecStmt(stmt, text)
+		text.write(";")
 	case *ast.AssignStmt:
 		cl.writeAssignStmt(stmt, text)
-	case *ast.DeferStmt:
-		cl.writeDeferStmt(stmt, text)
+		text.write(";")
 	case *ast.ReturnStmt:
 		cl.writeReturnStmt(stmt, text)
+		text.write(";")
+	case *ast.DeferStmt:
+		cl.writeDeferStmt(stmt, text)
 	case *ast.BranchStmt:
 		cl.writeBranchStmt(stmt, text)
 	case *ast.BlockStmt:
@@ -1670,8 +1755,9 @@ func (cl *Compiler) writeStmt(stmt ast.Stmt, text *TextStream) string {
 	case *ast.DeclStmt:
 		cl.writeDeclStmt(stmt, text)
 	case *ast.SwitchStmt:
-		// TODO: Implement switch statement
-		cl.errorf(stmt.Pos(), "unsupported statement type")
+		cl.writeSwitchStmt(stmt, text)
+	case *ast.CaseClause:
+		cl.writeCaseStmt(stmt, text)
 	default:
 		cl.errorf(stmt.Pos(), "unsupported statement type")
 	}
@@ -1681,101 +1767,17 @@ func (cl *Compiler) writeStmt(stmt ast.Stmt, text *TextStream) string {
 func (cl *Compiler) writeStmtList(list []ast.Stmt, text *TextStream) {
 	for _, stmt := range list {
 		cl.writeStmt(stmt, text)
-		text.write(";")
 		text.writeLn()
 	}
 }
 
 // ----------------------------------------------------------
 // ----------------------------------------------------------
-//                         Top-level
+//
+//	Top-level
+//
 // ----------------------------------------------------------
 // ----------------------------------------------------------
-
-func parseCoreSettings(lit *ast.CompositeLit, settings *core.Settings) {
-	for _, elt := range lit.Elts {
-		if kv, ok := elt.(*ast.KeyValueExpr); ok {
-			if key, ok := kv.Key.(*ast.Ident); ok {
-				if key.Name == "ExportSource" {
-					if val, ok := kv.Value.(*ast.Ident); ok {
-						settings.ExportSource = val.Name == "true"
-					} else if val, ok := kv.Value.(*ast.BasicLit); ok {
-						if val.Kind == token.STRING {
-							settings.ExportSource = val.Value == "true"
-						}
-					}
-				} else if key.Name == "ExportHeader" {
-					if val, ok := kv.Value.(*ast.Ident); ok {
-						settings.ExportHeader = val.Name == "true"
-					} else if val, ok := kv.Value.(*ast.BasicLit); ok {
-						if val.Kind == token.STRING {
-							settings.ExportHeader = val.Value == "true"
-						}
-					}
-				} else if key.Name == "Instance" {
-					if val, ok := kv.Value.(*ast.Ident); ok {
-						settings.Instance, _ = strconv.Unquote(val.Name)
-					} else if val, ok := kv.Value.(*ast.BasicLit); ok {
-						if val.Kind == token.STRING {
-							settings.Instance, _ = strconv.Unquote(val.Value)
-						}
-					}
-				} else if key.Name == "Namespace" {
-					if val, ok := kv.Value.(*ast.BasicLit); ok {
-						if val.Kind == token.STRING {
-							settings.Namespace, _ = strconv.Unquote(val.Value)
-						}
-					}
-				} else if key.Name == "OutputPrefix" {
-					if val, ok := kv.Value.(*ast.BasicLit); ok {
-						if val.Kind == token.STRING {
-							settings.OutputPrefix, _ = strconv.Unquote(val.Value)
-						}
-					}
-				} else if key.Name == "Includes" {
-					// Includes is a []string
-					if val, ok := kv.Value.(*ast.CompositeLit); ok {
-						for _, elt := range val.Elts {
-							if key, ok := elt.(*ast.BasicLit); ok {
-								if key.Kind == token.STRING {
-									settings.Includes = append(settings.Includes, strings.Trim(key.Value, "\""))
-								}
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-}
-
-func (cl *Compiler) collectPackageSettings(pkg *packages.Package) *core.Settings {
-	settings := core.NewSettings()
-	for _, file := range pkg.Syntax {
-		for _, decl := range file.Decls {
-			switch decl := decl.(type) {
-			case *ast.GenDecl:
-				for _, spec := range decl.Specs {
-					switch spec := spec.(type) {
-					case *ast.ValueSpec:
-						for vi, name := range spec.Names {
-							if name.Name == "__settings" {
-								specValue := spec.Values[vi]
-								switch valueType := specValue.(type) {
-								case *ast.CompositeLit:
-									parseCoreSettings(valueType, settings)
-									return settings
-								}
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-	return settings
-}
-
 func (cl *Compiler) getFilename(file *ast.File, cwd string) string {
 	fileName := cl.fileSet.Position(file.Pos()).Filename
 	// Make relative to the current directory
@@ -1850,8 +1852,7 @@ func (cl *Compiler) compile() bool {
 	})
 
 	for _, pkg := range pkgs {
-		settings := cl.collectPackageSettings(pkg)
-		cl.currentGoPkg = newGoPackage(pkg, settings)
+		cl.currentGoPkg = newGoPackage(pkg)
 		cl.nameToGoPackage[cl.currentGoPkg.name] = cl.currentGoPkg
 	}
 
@@ -1874,17 +1875,17 @@ func (cl *Compiler) compile() bool {
 						for _, spec := range decl.Specs {
 							switch spec := spec.(type) {
 							case *ast.TypeSpec:
-								_, def := cl.typesDef(spec.Name)
+								def := cl.typesDef(spec.Name)
 								goFile.objTypeSpecs[def] = spec
 							case *ast.ValueSpec:
 								for _, name := range spec.Names {
-									_, def := cl.typesDef(name)
+									def := cl.typesDef(name)
 									goFile.objValueSpecs[def] = spec
 								}
 							}
 						}
 					case *ast.FuncDecl:
-						_, def := cl.typesDef(decl.Name)
+						def := cl.typesDef(decl.Name)
 						goFile.objFuncDecls[def] = decl
 					}
 				}
@@ -1896,6 +1897,14 @@ func (cl *Compiler) compile() bool {
 		for _, pkg := range pkgs {
 			cl.currentGoPkg = cl.nameToGoPackage[pkg.Types.Name()]
 			goPkg := cl.currentGoPkg
+			//goPkgSettings, err := core.LoadSettings(pkg.Types.Name(), goPkg.pkg.PkgPath+"/"+goPkg.name+".json")
+			if err != nil {
+				fmt.Fprintln(cl.errors, err)
+			}
+			//if goPkgSettings != nil {
+			//	goPkg.settings = goPkgSettings
+			//}
+
 			if !goPkg.settings.ExportSource && !goPkg.settings.ExportHeader {
 				continue
 			}
@@ -1903,6 +1912,14 @@ func (cl *Compiler) compile() bool {
 			for _, file := range pkg.Syntax {
 				goFilename := cl.getFilename(file, currentDir)
 				goFile := goPkg.goFiles[goFilename]
+				//goFileSettings, err := core.LoadSettings(pkg.Types.Name(), currentDir+"/"+goFilename+".json")
+				if err != nil {
+					fmt.Fprintln(cl.errors, err)
+				}
+				//if goFileSettings != nil {
+				//	goFile.settings = goFileSettings
+				//}
+
 				for _, decl := range file.Decls {
 					switch decl := decl.(type) {
 					case *ast.GenDecl:
@@ -1942,13 +1959,13 @@ func (cl *Compiler) compile() bool {
 									// }
 
 									ast.Inspect(typeSpec.Type, func(node ast.Node) bool {
-										if ident, ok := node.(*ast.Ident); ok {
-											//cl.types.Uses[ident]
-											_, uses := cl.typesUses(ident)
-											if typeSpec, ok := goFile.objTypeSpecs[uses]; ok {
-												visitTypeSpec(typeSpec, export)
-											}
-										}
+										// if ident, ok := node.(*ast.Ident); ok {
+										// 	//cl.types.Uses[ident]
+										// 	_, uses := cl.typesUses(ident)
+										// 	if typeSpec, ok := goFile.objTypeSpecs[uses]; ok {
+										// 		visitTypeSpec(typeSpec, export)
+										// 	}
+										// }
 										return true
 									})
 									if !visited {
@@ -2040,14 +2057,14 @@ func (cl *Compiler) compile() bool {
 			for _, valueSpec := range goFile.valueSpecs {
 				for i, name := range valueSpec.Names {
 					memberIdent := cl.getIdent(name)
-					var value []string
+					var value string
 					if len(valueSpec.Values) > 0 {
 						text := newTextStream(2)
 						cl.writeExpr(valueSpec.Values[i], text)
 						text.flush()
-						value = text.Lines
+						value = strings.Join(text.Lines, "\n")
 					}
-					_, typeof := cl.typesTypeOf(valueSpec.Names[i])
+					typeof := cl.typesTypeOf(valueSpec.Names[i])
 					typeStr := cl.genTypeExpr(typeof, valueSpec.Pos(), "")
 					if goPkg.name != "ngo_cxx" && typeStr == "ngo_cxx::Settings" {
 						continue

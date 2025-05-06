@@ -1,7 +1,3 @@
-//gx:include <string.h>
-//gx:include "rect.hh"
-//gx:include "sum_fields.hh"
-
 package main
 
 import (
@@ -667,20 +663,20 @@ func testImports() {
 // Externs
 //
 
-//gx:extern rect::NUM_VERTICES
 const RectNumVertices = 0 // Ensure use of actual C++ constant value
 
-//gx:extern rect::Rect
 type Rect struct {
 	X, Y          float32
 	Width, Height float32
 }
 
-//gx:extern rect::area
-func area(r Rect) float32
+func area(r Rect) float32 {
+	return r.Width * r.Height
+}
 
-//gx:extern rect::area
-func (r Rect) area() float32
+func (r Rect) area() float32 {
+	return r.Width * r.Height
+}
 
 func testExterns() {
 	{
@@ -697,15 +693,15 @@ func testExterns() {
 		check(nperson.Population == 0)
 		p := nperson.NewPerson(20, 100, 42)
 		check(nperson.Population == 1)
-		check(p.Age() == 20)
-		check(p.Health() == 100)
-		check(p.IQ() == 42)
+		check(p.GetAge() == 20)
+		check(p.GetHealth() == 100)
+		check(p.GetIQ() == 42)
 
-		p.Grow()
+		p.GetGrow()
 
-		check(p.Age() == 21)
-		check(p.Health() == 100)
-		check(p.IQ() == 42)
+		check(p.GetAge() == 21)
+		check(p.GetHealth() == 100)
+		check(p.GetIQ() == 42)
 
 		check(p.GetAgeAdder()(1) == 22)
 	}
@@ -743,8 +739,9 @@ type Nums struct {
 	D       int `attribs:"twice"`
 }
 
-//gx:extern sumFields
-func sumFields(val interface{}) int
+func sumFields(n Nums) int {
+	return n.A + n.B + n.C + n.D
+}
 
 func testMeta() {
 	n := Nums{1, 2, 3, 4}
@@ -773,8 +770,15 @@ func testDefaults() {
 // Strings
 //
 
-//gx:extern std::strcmp
-func strcmp(a, b string) int
+func strcmp(a, b string) int {
+	if a == b {
+		return 0
+	}
+	if a < b {
+		return -1
+	}
+	return 1
+}
 
 type HasString struct {
 	s string
