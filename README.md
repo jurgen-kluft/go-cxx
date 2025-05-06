@@ -2,6 +2,8 @@
 
 ## TODO
 
+- First generate the header file, then for the source file first generate the namespace, functions and their implementations, this can trigger the use of more includes.
+  So the includes should exported last and then inserted at the top of the source file.
 - Function parameters that are a struct type should be emitted as `const Type&` instead of `Type` to avoid copying the object.
 - Const functions that return a struct type should be emitted as `const Type&` instead of `Type` to avoid copying the object.
 - Figure out how to generate constructors for structs. For example, all `new(Person).Constructor(...)`, `new(Person).Constructor2(...)`, should be used to generate
